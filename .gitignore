@@ -1,0 +1,29 @@
+# Environment Variables & API Credentials (NEVER COMMIT SENSITIVE KEYS)
+.env
+credentials.json
+
+# Local Configuration & Databases
+log_channels.json
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# IDE & Editor Configuration
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Brain / System Generated Artifacts
+.gemini/
