@@ -481,14 +481,90 @@ async def check_prefix(ctx: commands.Context, ig_link: str = None):
             )
             await ctx.send(embed=embed)
         else:
-            embed = discord.Embed(
-                title="Influencer Unclaimed!",
-                description=f"`{clean_url}` is **available to claim** using `!claim` or `/claim`!",
-                color=discord.Color.green()
-            )
-            await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"Error checking database: {str(e)}")
+# ----------------------------------------------------
+# DISCORD COMPONENTS V2 HELP COMMAND (/help & !help)
+# ----------------------------------------------------
+
+class HelpCategorySelect(discord.ui.Select):
+    def __init__(self, current_category: str = "worker"):
+        options = [
+            discord.SelectOption(label="1. Worker Commands & Daily Logging", value="worker", default=(current_category == "worker")),
+            discord.SelectOption(label="2. Influencer Claims & Checks", value="influencer", default=(current_category == "influencer")),
+            discord.SelectOption(label="3. Admin Strike Management", value="strike_admin", default=(current_category == "strike_admin")),
+            discord.SelectOption(label="4. Audit Logs Setup & Testing", value="setup_testing", default=(current_category == "setup_testing")),
+        ]
+        super().__init__(
+            placeholder="Select a help topic to view commands...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="v2_help_cat_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        cat = self.values[0]
+        v2_help_view = build_help_v2_layout(category=cat)
+        await interaction.response.edit_message(view=v2_help_view)
+
+
+def build_help_v2_layout(category: str = "worker") -> discord.ui.LayoutView:
+    """Constructs a clean Discord Components V2 help guide card with zero emojis and normal hyphens."""
+    layout_view = discord.ui.LayoutView()
+    container = discord.ui.Container(accent_color=discord.Color.blue())
+
+    container.add_item(discord.ui.TextDisplay("## Bot Command Guide & Documentation"))
+    container.add_item(discord.ui.Separator())
+
+    if category == "worker":
+        container.add_item(discord.ui.TextDisplay(
+            "- **__Worker Commands & Daily Logging:__**\n"
+            "- **Log DMs (Today):** Use the dropdown menu on the pinned query channel dashboard to submit daily DM counts.\n"
+            "- **Screen Recording Proof:** Post an `.mp4` / `.mov` file or video link in your query channel before 1:00 AM IST daily.\n"
+            "- **View Stats:** Click the green **View Stats** button on your dashboard to see your 7-day performance log and strike history."
+        ))
+    elif category == "influencer":
+        container.add_item(discord.ui.TextDisplay(
+            "- **__Influencer Registration Commands:__**\n"
+            "- **/claim <ig_link>:** Claims an influencer's Instagram URL and registers it in the Google Spreadsheet database.\n"
+            "- **/check <ig_link>:** Checks if an Instagram URL has already been claimed by another staff member.\n"
+            "- **Prefix Commands:** `!claim <link>` and `!check <link>` are also supported."
+        ))
+    elif category == "strike_admin":
+        container.add_item(discord.ui.TextDisplay(
+            "- **__Admin Strike Management:__**\n"
+            "- **/remove_strike [channel] [amount] [reason]:** Manually remove active strikes from a query channel worker.\n"
+            "- **Undo Last Strike Button:** Click the red **Undo Last Strike** button on the query channel dashboard to revoke the latest strike.\n"
+            "- **Unclaim Channel Button:** Admins can unclaim a channel worker via the top dashboard button."
+        ))
+    elif category == "setup_testing":
+        container.add_item(discord.ui.TextDisplay(
+            "- **__Audit Logs Setup & Testing:__**\n"
+            "- **/setup-logs:** Auto-create and bind the 5 audit log channels (`#influencer-claim-logs`, `#staff-strike-logs`, `#worker-add-logs`, `#worker-remove-logs`, `#worksheet-changes-logs`).\n"
+            "- **/speed_time <seconds> <time>:** Advance bot clock to test 24h deadline strikes (e.g. `/speed_time 0 12h`).\n"
+            "- **/stop_speed_time:** Stop clock acceleration and return to real time.\n"
+            "- **/sync:** Instantly sync all slash commands to the current server."
+        ))
+
+    container.add_item(discord.ui.Separator())
+
+    select_row = discord.ui.ActionRow()
+    select_row.add_item(HelpCategorySelect(current_category=category))
+    container.add_item(select_row)
+
+    layout_view.add_item(container)
+    return layout_view
+
+
+@bot.tree.command(name="help", description="View interactive bot documentation and command guide.")
+async def help_slash(interaction: discord.Interaction):
+    v2_help_view = build_help_v2_layout(category="worker")
+    await interaction.response.send_message(view=v2_help_view, ephemeral=True)
+
+
+@bot.command(name="help")
+async def help_prefix(ctx: commands.Context):
+    v2_help_view = build_help_v2_layout(category="worker")
+    await ctx.send(view=v2_help_view)
 
 
 # DEV TESTING COMMANDS
