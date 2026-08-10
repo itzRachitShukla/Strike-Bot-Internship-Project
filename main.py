@@ -943,12 +943,7 @@ async def on_ready():
         for ch in guild.text_channels:
             if is_query_channel(ch):
                 try:
-                    from pinned_dashboard import resend_channel_dashboard
-                    state = strike_tracker.channel_states.get(str(ch.id))
-                    if not state or not state.get("dashboard_msg_id"):
-                        await resend_channel_dashboard(ch)
-                    else:
-                        await strike_tracker.initialize_channel(ch)
+                    await strike_tracker.initialize_channel(ch)
                 except Exception as e:
                     print(f"Error initializing query channel #{ch.name} on startup: {e}")
 
