@@ -128,6 +128,34 @@ class DashboardSelect(discord.ui.Select):
             await send_v2_stats_response(interaction)
 
 
+class AssignWorkerSelect(discord.ui.UserSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Select a worker to manually assign to this channel...",
+            min_values=1,
+            max_values=1,
+            custom_id="v2_assign_worker_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await safe_defer(interaction, ephemeral=True)
+        if not self.values:
+            return
+        selected_user = self.values[0]
+        from strike_tracker import strike_tracker
+        res = await strike_tracker.claim_channel_worker(interaction.channel, selected_user)
+        if res:
+            await interaction.followup.send(
+                f"Success! Manually assigned worker {selected_user.mention} to this channel.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"Failed to assign {selected_user.mention}.",
+                ephemeral=True
+            )
+
+
 # --- Text-Only Control Buttons ---
 
 class ClaimChannelButton(discord.ui.Button):
@@ -417,6 +445,10 @@ def build_dashboard_v2_layout(
     select_action_row = discord.ui.ActionRow()
     select_action_row.add_item(DashboardSelect(current_day=current_day, disabled=is_unclaimed))
     container.add_item(select_action_row)
+
+    assign_worker_row = discord.ui.ActionRow()
+    assign_worker_row.add_item(AssignWorkerSelect())
+    container.add_item(assign_worker_row)
     
     layout_view.add_item(container)
 
