@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from config import DISCORD_TOKEN, GOOGLE_SERVICE_ACCOUNT_FILE, SPREADSHEET_ID, STRIKE_DEADLINE_HOURS, REVOCATION_STREAK_DAYS, AUDIT_INTERVAL_MINUTES
-from sheets_manager import sheets_manager, normalize_ig_link
+from sheets_manager import sheets_manager, normalize_link, normalize_ig_link
 from strike_tracker import strike_tracker, is_query_channel, is_video_message
 from pinned_dashboard import update_pinned_dashboard, DashboardLayoutView
 from logger_service import logger_service
