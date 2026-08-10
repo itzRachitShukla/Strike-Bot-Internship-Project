@@ -163,7 +163,7 @@ class UndoStrikeButton(discord.ui.Button):
             return
 
         from strike_tracker import strike_tracker
-        res = await strike_tracker.undo_last_strike(interaction.channel)
+        res = await strike_tracker.undo_last_strike(interaction.channel, admin_user=interaction.user)
         if res:
             await interaction.followup.send("Success! The last strike has been undone.", ephemeral=True)
         else:
@@ -431,9 +431,10 @@ async def update_pinned_dashboard(
     strike_dates: list,
     last_video_dt: datetime | None,
     day_values: list = None,
-    total_dms: int = 0
+    total_dms: int = 0,
+    force_new: bool = False
 ):
-    """Finds or creates a pinned message in the query channel, strictly editing the existing panel in place."""
+    """Finds or creates a pinned message in the query channel, editing in place unless force_new=True."""
     channel_id = str(channel.id)
     if day_values is None:
         rec = await sheets_manager.get_dm_record(channel_id)
@@ -448,79 +449,122 @@ async def update_pinned_dashboard(
 
     dashboard_msg = None
 
-    # 1. Try fetching directly via cached message ID first
-    if cached_msg_id:
-        try:
-            dashboard_msg = await channel.fetch_message(int(cached_msg_id))
-        except Exception:
-            dashboard_msg = None
+    if not force_new:
+        # 1. Try fetching directly via cached message ID first
+        if cached_msg_id:
+            try:
+                dashboard_msg = await channel.fetch_message(int(cached_msg_id))
+            except Exception:
+                dashboard_msg = None
 
-    # 2. Fallback: Search pinned messages using component tree matching
-    if not dashboard_msg:
-        try:
-            pinned_messages = await channel.pins()
-        except Exception as e:
-            print(f"Error fetching pinned messages in {channel.name}: {e}")
-            pinned_messages = []
-
-        dashboard_custom_ids = {
-            "v2_claim_channel_btn", "v2_unclaim_channel_btn", "v2_undo_strike_btn", "v2_view_stats_btn", "v2_dashboard_select_menu"
-        }
-
-        def is_bot_dashboard_message(msg):
-            if not msg.author or not hasattr(msg.author, "id"):
-                return False
-            guild = getattr(msg, "guild", None) or getattr(getattr(msg, "channel", None), "guild", None)
-            if guild and getattr(guild, "me", None) and getattr(guild.me, "id", None):
-                if msg.author.id != guild.me.id:
-                    return False
+        # 2. Fallback: Search pinned messages using component tree matching
+        if not dashboard_msg:
+            try:
+                pinned_messages = await channel.pins()
+            except Exception as e:
+                print(f"Error fetching pinned messages in {channel.name}: {e}")
+                pinned_messages = []
 
             dashboard_custom_ids = {
                 "v2_claim_channel_btn", "v2_unclaim_channel_btn", "v2_undo_strike_btn", "v2_view_stats_btn", "v2_dashboard_select_menu"
             }
 
-            items_to_check = []
-            if hasattr(msg, "view") and msg.view and hasattr(msg.view, "children"):
-                items_to_check.extend(msg.view.children)
-            if hasattr(msg, "components") and msg.components:
-                items_to_check.extend(msg.components)
+            def is_bot_dashboard_message(msg):
+                if not msg.author or not hasattr(msg.author, "id"):
+                    return False
+                guild = getattr(msg, "guild", None) or getattr(getattr(msg, "channel", None), "guild", None)
+                if guild and getattr(guild, "me", None) and getattr(guild.me, "id", None):
+                    if msg.author.id != guild.me.id:
+                        return False
 
-            if not items_to_check:
-                return True
+                items_to_check = []
+                if hasattr(msg, "view") and msg.view and hasattr(msg.view, "children"):
+                    items_to_check.extend(msg.view.children)
+                if hasattr(msg, "components") and msg.components:
+                    items_to_check.extend(msg.components)
 
-            def check_items(items):
-                for item in items:
-                    if getattr(item, "custom_id", None) in dashboard_custom_ids:
-                        return True
-                    children = getattr(item, "children", None) or getattr(item, "components", None)
-                    if children and check_items(children):
-                        return True
-                return False
+                if not items_to_check:
+                    return True
 
-            return check_items(items_to_check)
+                def check_items(items):
+                    for item in items:
+                        if getattr(item, "custom_id", None) in dashboard_custom_ids:
+                            return True
+                        children = getattr(item, "children", None) or getattr(item, "components", None)
+                        if children and check_items(children):
+                            return True
+                    return False
 
-        for msg in pinned_messages:
-            if is_bot_dashboard_message(msg):
-                dashboard_msg = msg
-                break
+                return check_items(items_to_check)
 
-    # 3. Edit existing dashboard message in place
-    if dashboard_msg:
-        try:
-            if channel_id in strike_tracker.channel_states:
-                strike_tracker.channel_states[channel_id]["dashboard_msg_id"] = dashboard_msg.id
-            await dashboard_msg.edit(embed=None, view=layout_view)
-            return dashboard_msg
-        except discord.HTTPException as e:
-            print(f"Edit failed in {channel.name}, creating new dashboard: {e}")
+            for msg in pinned_messages:
+                if is_bot_dashboard_message(msg):
+                    dashboard_msg = msg
+                    break
 
-    # 4. Create & pin new dashboard message only if none exists
+        # 3. Edit existing dashboard message in place
+        if dashboard_msg:
+            try:
+                if channel_id in strike_tracker.channel_states:
+                    strike_tracker.channel_states[channel_id]["dashboard_msg_id"] = dashboard_msg.id
+                await dashboard_msg.edit(embed=None, view=layout_view)
+                return dashboard_msg
+            except discord.HTTPException as e:
+                print(f"Edit failed in {channel.name}, creating new dashboard: {e}")
+
+    # 4. Create & pin new dashboard message at bottom of channel
     try:
         new_msg = await channel.send(view=layout_view)
-        await new_msg.pin()
+        try:
+            await new_msg.pin()
+        except Exception as pe:
+            print(f"Warning pinning message in {channel.name}: {pe}")
         if channel_id in strike_tracker.channel_states:
             strike_tracker.channel_states[channel_id]["dashboard_msg_id"] = new_msg.id
         return new_msg
     except Exception as e:
         print(f"Error creating/pinning dashboard message in {channel.name}: {e}")
         return None
+
+
+async def resend_channel_dashboard(channel: discord.TextChannel):
+    """Deletes any existing pinned dashboard in channel and posts + pins a fresh new panel at the bottom."""
+    channel_id = str(channel.id)
+    from strike_tracker import strike_tracker
+    if channel_id not in strike_tracker.channel_states:
+        await strike_tracker.initialize_channel(channel)
+
+    state = strike_tracker.channel_states[channel_id]
+    cached_msg_id = state.get("dashboard_msg_id")
+
+    # Clean up all existing bot dashboard messages in channel pins
+    try:
+        pinned_messages = await channel.pins()
+        dashboard_custom_ids = {
+            "v2_claim_channel_btn", "v2_unclaim_channel_btn", "v2_undo_strike_btn", "v2_view_stats_btn", "v2_dashboard_select_menu"
+        }
+        for msg in pinned_messages:
+            if msg.author and hasattr(msg.author, "id"):
+                guild = getattr(msg, "guild", None) or getattr(channel, "guild", None)
+                if guild and getattr(guild, "me", None) and msg.author.id == guild.me.id:
+                    try:
+                        await msg.unpin()
+                    except Exception:
+                        pass
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"Error cleaning up old dashboard pins in {channel.name}: {e}")
+
+    state["dashboard_msg_id"] = None
+    return await update_pinned_dashboard(
+        channel,
+        state["worker_name"],
+        state.get("worker_user_id"),
+        state["active_strikes"],
+        state["strike_dates"],
+        state["last_video_dt"],
+        force_new=True
+    )

@@ -2,9 +2,10 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch, MagicMock
 from datetime import datetime, timedelta
+import discord
 
-from strike_tracker import strike_tracker, is_query_channel, is_video_message, IST
-from pinned_dashboard import build_dashboard_v2_layout, DashboardLayoutView
+from strike_tracker import strike_tracker, is_query_channel, is_video_message
+from pinned_dashboard import build_dashboard_v2_layout, DashboardLayoutView, update_pinned_dashboard
 from logger_service import logger_service
 from main import parse_time_string_to_hours
 
@@ -13,6 +14,7 @@ class MockAuthor:
         self.name = name
         self.display_name = name
         self.id = user_id
+        self.mention = f"<@{user_id}>"
         self.bot = False
 
     def __eq__(self, other):
@@ -21,7 +23,11 @@ class MockAuthor:
 class MockGuild:
     def __init__(self):
         self.id = 12345
+        self.name = "TestGuild"
         self.me = MockAuthor("BotUser", 99999)
+
+    def get_channel(self, channel_id):
+        return None
 
 class MockChannel:
     def __init__(self, channel_id=101, name="test-query"):
@@ -33,12 +39,18 @@ class MockChannel:
         self.pins_list = []
 
     async def send(self, content=None, embed=None, view=None):
-        msg = MockMessage(self, content, embed, view)
+        msg = MockMessage(self, content=content or "", embed=embed, view=view)
         self.sent_messages.append(msg)
         return msg
 
     async def pins(self):
         return self.pins_list
+
+    async def fetch_message(self, message_id):
+        for msg in self.sent_messages:
+            if msg.id == message_id:
+                return msg
+        raise discord.NotFound(MagicMock(), "Message not found")
 
 
 class MockAttachment:
@@ -51,7 +63,7 @@ class MockMessage:
     def __init__(self, channel, content="", embed=None, view=None, author=None, attachments=None, msg_id=999111):
         self.id = msg_id
         self.channel = channel
-        self.content = content
+        self.content = content or ""
         self.embeds = [embed] if embed else []
         self.components = []
         self.view = view
@@ -101,7 +113,7 @@ class TestBotLogic(unittest.IsolatedAsyncioTestCase):
     def test_v2_dashboard_layout_construction(self):
         ch = MockChannel()
         # Test Claimed State
-        view_claimed = build_dashboard_v2_layout(ch, "TestWorker", "123456", 1, ["2026-08-01 10:00:00 IST"], datetime.now(IST), [10]*7, 70)
+        view_claimed = build_dashboard_v2_layout(ch, "TestWorker", "123456", 1, ["2026-08-01 10:00:00 UTC"], datetime.utcnow(), [10]*7, 70)
         self.assertIsInstance(view_claimed, DashboardLayoutView)
         self.assertEqual(len(view_claimed.children), 1)
 
@@ -128,27 +140,63 @@ class TestBotLogic(unittest.IsolatedAsyncioTestCase):
         await strike_tracker.initialize_channel(ch)
         self.assertIn(channel_id, strike_tracker.channel_states)
         
-        state = strike_tracker.channel_states[channel_id]
-        state["worker_user_id"] = "123456"  # Claim channel to enable auditing
-        
-        # Simulate missing video past deadline
-        state["last_video_dt"] = datetime.now(IST) - timedelta(days=2)
-        
-        # Fast forward time to trigger deadline
-        await strike_tracker.simulate_time_travel(ch, 48.0)
+        # Claim channel worker
+        worker = MockAuthor("ClaimedWorker", 777123)
+        await strike_tracker.claim_channel_worker(ch, worker)
+        self.assertEqual(strike_tracker.channel_states[channel_id]["worker_user_id"], "777123")
 
+        # Simulate video breach
+        state = strike_tracker.channel_states[channel_id]
+        state["last_video_dt"] = datetime.utcnow() - timedelta(hours=25)
+        
         # Run audit (should trigger strike #1)
         await strike_tracker.audit_channel(ch, bot=None)
         self.assertEqual(state["active_strikes"], 1)
         
-        # Fast forward 8 days with daily video submitted for current window
-        now_eff = strike_tracker._get_effective_now(channel_id)
-        state["strike_dates"][-1] = (now_eff - timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S IST")
-        state["last_video_dt"] = now_eff
+        # Fast forward 8 days without new strikes
+        state["strike_dates"][-1] = (datetime.utcnow() - timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S IST")
+        state["last_video_dt"] = datetime.utcnow()
         
-        # Run audit (should revoke strike #1 after 7 clean days)
+        # Run audit (should revoke strike #1)
         await strike_tracker.audit_channel(ch, bot=None)
         self.assertEqual(state["active_strikes"], 0)
+
+    @patch("sheets_manager.sheets_manager.get_all_staff_records", new_callable=AsyncMock)
+    @patch("sheets_manager.sheets_manager.update_staff_record", new_callable=AsyncMock)
+    @patch("sheets_manager.sheets_manager.get_dm_record", new_callable=AsyncMock)
+    async def test_manual_strike_addition_and_2strike_warning(self, mock_dm_rec, mock_update_staff, mock_get_staff):
+        mock_get_staff.return_value = []
+        mock_dm_rec.return_value = {}
+
+        ch = MockChannel(channel_id=777, name="test-query")
+        await strike_tracker.initialize_channel(ch)
+        
+        admin_user = MockAuthor("AdminUser", 999000)
+        # Add 1 strike
+        await strike_tracker.add_strikes(ch, amount=1, reason="Test Reason 1", admin_user=admin_user)
+        state = strike_tracker.channel_states[str(ch.id)]
+        self.assertEqual(state["active_strikes"], 1)
+
+        # Add 2nd strike (should include 2 strike warning text)
+        await strike_tracker.add_strikes(ch, amount=1, reason="Test Reason 2", admin_user=admin_user)
+        self.assertEqual(state["active_strikes"], 2)
+        self.assertTrue(any("WARNING!" in msg.content for msg in ch.sent_messages))
+
+    @patch("sheets_manager.sheets_manager.get_all_staff_records", new_callable=AsyncMock)
+    @patch("sheets_manager.sheets_manager.update_staff_record", new_callable=AsyncMock)
+    @patch("sheets_manager.sheets_manager.get_dm_record", new_callable=AsyncMock)
+    async def test_resend_channel_dashboard(self, mock_dm_rec, mock_update_staff, mock_get_staff):
+        mock_get_staff.return_value = []
+        mock_dm_rec.return_value = {}
+
+        ch = MockChannel(channel_id=555, name="resend-query")
+        await strike_tracker.initialize_channel(ch)
+
+        state = strike_tracker.channel_states[str(ch.id)]
+
+        # Call resend dashboard
+        msg = await update_pinned_dashboard(ch, state["worker_name"], state.get("worker_user_id"), state["active_strikes"], state["strike_dates"], state["last_video_dt"])
+        self.assertIsNotNone(msg)
 
 
 if __name__ == "__main__":

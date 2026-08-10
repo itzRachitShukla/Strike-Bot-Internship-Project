@@ -16,7 +16,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # Helper function to parse time strings like 12h, 7d, 12d, 1m, 50s into hours
 def parse_time_string_to_hours(time_str: str) -> float:
@@ -60,10 +60,11 @@ async def safe_respond(interaction: discord.Interaction, content: str = None, em
 def build_setup_logs_embed(active_category: str = "claim") -> discord.Embed:
     cat_names = {
         "claim": "1. Claim Logs",
-        "strike": "2. Strike Logs",
-        "worker_add": "3. Worker Add Logs",
-        "worker_remove": "4. Worker Remove Logs",
-        "worksheet": "5. Worksheet Changes Logs"
+        "strike": "2. Strike Event Logs",
+        "strike_3": "3. 3-Strike Alert Logs",
+        "worker_add": "4. Worker Add Logs",
+        "worker_remove": "5. Worker Remove Logs",
+        "worksheet": "6. Worksheet Changes Logs"
     }
     embed = discord.Embed(
         title="Audit Log Channels Configuration",
@@ -75,10 +76,15 @@ def build_setup_logs_embed(active_category: str = "claim") -> discord.Embed:
         color=discord.Color.blue()
     )
     embed.add_field(name="1. Claim Logs", value=f"<#{logger_service.log_channels.get('claim')}>" if logger_service.log_channels.get('claim') else "*Not Configured*", inline=False)
-    embed.add_field(name="2. Strike Logs", value=f"<#{logger_service.log_channels.get('strike')}>" if logger_service.log_channels.get('strike') else "*Not Configured*", inline=False)
-    embed.add_field(name="3. Worker Add Logs", value=f"<#{logger_service.log_channels.get('worker_add')}>" if logger_service.log_channels.get('worker_add') else "*Not Configured*", inline=False)
-    embed.add_field(name="4. Worker Remove Logs", value=f"<#{logger_service.log_channels.get('worker_remove')}>" if logger_service.log_channels.get('worker_remove') else "*Not Configured*", inline=False)
-    embed.add_field(name="5. Worksheet Changes Logs", value=f"<#{logger_service.log_channels.get('worksheet')}>" if logger_service.log_channels.get('worksheet') else "*Not Configured*", inline=False)
+    embed.add_field(name="2. Strike Event Logs", value=f"<#{logger_service.log_channels.get('strike')}>" if logger_service.log_channels.get('strike') else "*Not Configured*", inline=False)
+    embed.add_field(name="3. 3-Strike Alert Logs", value=f"<#{logger_service.log_channels.get('strike_3')}>" if logger_service.log_channels.get('strike_3') else "*Not Configured*", inline=False)
+    embed.add_field(name="4. Worker Add Logs", value=f"<#{logger_service.log_channels.get('worker_add')}>" if logger_service.log_channels.get('worker_add') else "*Not Configured*", inline=False)
+    embed.add_field(name="5. Worker Remove Logs", value=f"<#{logger_service.log_channels.get('worker_remove')}>" if logger_service.log_channels.get('worker_remove') else "*Not Configured*", inline=False)
+    embed.add_field(name="6. Worksheet Changes Logs", value=f"<#{logger_service.log_channels.get('worksheet')}>" if logger_service.log_channels.get('worksheet') else "*Not Configured*", inline=False)
+    
+    ping_display = ", ".join(logger_service.ping_targets) if logger_service.ping_targets else "*None Configured*"
+    embed.add_field(name="7. Configured 3-Strike Alert Pings", value=ping_display, inline=False)
+    
     embed.set_footer(text="Admin Log Setup • Changes persist automatically across restarts")
     return embed
 
@@ -89,9 +95,10 @@ class CategorySelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="1. Influencer Claim Logs", value="claim", default=(selected_category == "claim")),
             discord.SelectOption(label="2. Strike Event Logs", value="strike", default=(selected_category == "strike")),
-            discord.SelectOption(label="3. Worker Add Logs", value="worker_add", default=(selected_category == "worker_add")),
-            discord.SelectOption(label="4. Worker Remove Logs", value="worker_remove", default=(selected_category == "worker_remove")),
-            discord.SelectOption(label="5. Worksheet Changes Logs", value="worksheet", default=(selected_category == "worksheet")),
+            discord.SelectOption(label="3. 3-Strike Alert Logs", value="strike_3", default=(selected_category == "strike_3")),
+            discord.SelectOption(label="4. Worker Add Logs", value="worker_add", default=(selected_category == "worker_add")),
+            discord.SelectOption(label="5. Worker Remove Logs", value="worker_remove", default=(selected_category == "worker_remove")),
+            discord.SelectOption(label="6. Worksheet Changes Logs", value="worksheet", default=(selected_category == "worksheet")),
         ]
         super().__init__(
             placeholder="Select a log category to configure manually...",
@@ -127,6 +134,24 @@ class LogChannelSelect(discord.ui.ChannelSelect):
         await interaction.followup.send(f"Configured **{self.category.replace('_', ' ').title()}** log channel to {selected_ch.mention}.", ephemeral=True)
 
 
+class PingTargetSelect(discord.ui.MentionableSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Select roles or members to ping on 3-strike alerts...",
+            min_values=0,
+            max_values=10,
+            custom_id="setup_logs_ping_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        target_mentions = [val.mention for val in self.values]
+        logger_service.set_ping_targets(target_mentions)
+        mentions_str = ", ".join(target_mentions) if target_mentions else "*None (Pings cleared)*"
+        embed = build_setup_logs_embed()
+        await interaction.response.edit_message(embed=embed, view=SetupLogsView())
+        await interaction.followup.send(f"Configured 3-strike alert ping targets to: {mentions_str}", ephemeral=True)
+
+
 class AutoSetupLogsButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
@@ -136,45 +161,115 @@ class AutoSetupLogsButton(discord.ui.Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        await safe_respond(interaction, "Auto-creating audit log category and channels...", ephemeral=True)
+        await safe_respond(interaction, "Scanning guild for audit log category and channels...", ephemeral=True)
         guild = interaction.guild
         if not guild:
             return
 
-        category_name = "AUDIT LOGS"
-        category = discord.utils.get(guild.categories, name=category_name)
+        # 1. Search for any existing audit log category in the guild (case-insensitive)
+        category = None
+        for cat in guild.categories:
+            c_name = cat.name.lower()
+            if "audit" in c_name and "log" in c_name:
+                category = cat
+                break
+
+        # If no audit category exists at all, create "AUDIT LOGS"
         if not category:
             try:
-                category = await guild.create_category(category_name)
+                category = await guild.create_category("AUDIT LOGS")
             except Exception as e:
                 await interaction.followup.send(f"Error creating category: {e}", ephemeral=True)
                 return
 
-        channels_to_create = {
-            "claim": "influencer-claim-logs",
-            "strike": "staff-strike-logs",
-            "worker_add": "worker-add-logs",
-            "worker_remove": "worker-remove-logs",
-            "worksheet": "worksheet-changes-logs"
+        # 2. Define flexible channel keywords for matching pre-existing channels
+        channel_spec = {
+            "claim": {
+                "default_name": "influencer-claim-logs",
+                "keywords": ["influencer-claim", "claim-log"]
+            },
+            "strike": {
+                "default_name": "staff-strike-logs",
+                "keywords": ["staff-strike", "strike-event", "strike-log"]
+            },
+            "strike_3": {
+                "default_name": "three-strike-alert-logs",
+                "keywords": ["three-strike", "3-strike", "strike-3", "strike-alert"]
+            },
+            "worker_add": {
+                "default_name": "worker-add-logs",
+                "keywords": ["worker-add"]
+            },
+            "worker_remove": {
+                "default_name": "worker-remove-logs",
+                "keywords": ["worker-remove", "worker-unclaim"]
+            },
+            "worksheet": {
+                "default_name": "worksheet-changes-logs",
+                "keywords": ["worksheet-change", "worksheet-log", "sheet-change"]
+            }
         }
 
         created_text = []
-        for cat_key, ch_name in channels_to_create.items():
-            ch = discord.utils.get(category.text_channels, name=ch_name)
+        newly_created_count = 0
+        existing_count = 0
+
+        for cat_key, spec in channel_spec.items():
+            default_ch_name = spec["default_name"]
+            keywords = spec["keywords"]
+            existing_channel_id = logger_service.log_channels.get(cat_key)
+            ch = None
+
+            # Check if previously bound channel ID still exists in guild
+            if existing_channel_id:
+                try:
+                    ch = guild.get_channel(int(existing_channel_id))
+                except Exception:
+                    ch = None
+
+            # Search within category text channels first
+            if not ch and category:
+                for text_ch in category.text_channels:
+                    ch_name_lower = text_ch.name.lower()
+                    if any(kw in ch_name_lower for kw in keywords):
+                        ch = text_ch
+                        break
+
+            # Search across all text channels in the entire guild
+            if not ch:
+                for text_ch in guild.text_channels:
+                    ch_name_lower = text_ch.name.lower()
+                    if any(kw in ch_name_lower for kw in keywords):
+                        ch = text_ch
+                        break
+
+            # Only if channel is still nowhere to be found, create a new text channel
             if not ch:
                 try:
-                    ch = await category.create_text_channel(ch_name)
+                    ch = await category.create_text_channel(default_ch_name)
+                    newly_created_count += 1
+                    status_tag = "(Newly Created)"
                 except Exception as e:
-                    print(f"Error creating text channel #{ch_name}: {e}")
+                    print(f"Error creating text channel #{default_ch_name}: {e}")
                     continue
-            
-            logger_service.set_log_channel(cat_key, ch.id)
-            created_text.append(f"• **{cat_key.replace('_', ' ').title()}**: {ch.mention}")
+            else:
+                existing_count += 1
+                status_tag = "(Already Exists)"
 
-        embed = build_setup_logs_embed()
-        await interaction.message.edit(embed=embed, view=SetupLogsView())
+            logger_service.set_log_channel(cat_key, ch.id)
+            created_text.append(f"• **{cat_key.replace('_', ' ').title()}**: {ch.mention} `{status_tag}`")
+
+        embed = build_setup_logs_embed(active_category="strike_3")
+        await interaction.message.edit(embed=embed, view=SetupLogsView(active_category="strike_3"))
         
-        summary_msg = f"**Auto-Setup Complete!** Created category `{category_name}` and configured 5 log channels:\n" + "\n".join(created_text)
+        category_display_name = category.name if category else "AUDIT LOGS"
+        summary_msg = (
+            f"**Auto-Setup Complete!** Audit category `{category_display_name}` scan finished:\n"
+            f"• **Created:** `{newly_created_count}` missing channel(s)\n"
+            f"• **Preserved & Bound:** `{existing_count}` existing channel(s)\n\n"
+            + "\n".join(created_text)
+            + "\n\n**Action Required for 3-Strike Alert Pings:**\nUse the dropdown menu below (`Select roles or members to ping on 3-strike alerts...`) to choose which roles or members should be notified when a worker hits 3 strikes!"
+        )
         await interaction.followup.send(summary_msg, ephemeral=False)
 
 
@@ -184,9 +279,10 @@ class SetupLogsView(discord.ui.View):
         self.add_item(AutoSetupLogsButton())
         self.add_item(CategorySelect(selected_category=active_category))
         self.add_item(LogChannelSelect(category=active_category))
+        self.add_item(PingTargetSelect())
 
 
-@bot.tree.command(name="setup-logs", description="Configure channels for audit logging (Admin only).")
+@bot.tree.command(name="setup-logs", description="Configure channels and ping targets for audit logging (Admin only).")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_logs_slash(interaction: discord.Interaction):
     embed = build_setup_logs_embed(active_category="claim")
@@ -194,8 +290,36 @@ async def setup_logs_slash(interaction: discord.Interaction):
 
 
 # ----------------------------------------------------
-# REMOVE STRIKE SLASH COMMAND (/remove_strike)
+# STRIKE MANAGEMENT SLASH & PREFIX COMMANDS
 # ----------------------------------------------------
+
+@bot.tree.command(name="add_strike", description="Manually issue strike(s) to a query channel worker (Admin only).")
+@app_commands.describe(
+    channel="The query channel to issue strike(s) to (defaults to current channel)",
+    amount="Number of strikes to issue (default 1)",
+    reason="Reason for issuing the strike(s)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def add_strike_slash(interaction: discord.Interaction, channel: discord.TextChannel = None, amount: int = 1, reason: str = "Admin manual strike issuance"):
+    target_channel = channel or interaction.channel
+    if not is_query_channel(target_channel):
+        await safe_respond(interaction, content="`/add_strike` must target a query channel (`#-query` or `#-queries`).", ephemeral=True)
+        return
+
+    added = await strike_tracker.add_strikes(target_channel, amount=amount, reason=reason, admin_user=interaction.user)
+    await safe_respond(interaction, content=f"Successfully issued {added} strike(s) to {target_channel.mention}. Reason: {reason}", ephemeral=True)
+
+
+@bot.command(name="add_strike")
+@commands.has_permissions(administrator=True)
+async def add_strike_prefix(ctx: commands.Context, amount: int = 1, *, reason: str = "Admin manual strike issuance"):
+    if not is_query_channel(ctx.channel):
+        await ctx.send("This command can only be used inside a query channel.")
+        return
+
+    added = await strike_tracker.add_strikes(ctx.channel, amount=amount, reason=reason, admin_user=ctx.author)
+    await ctx.send(f"Successfully issued {added} strike(s) to {ctx.channel.mention}. Reason: {reason}")
+
 
 @bot.tree.command(name="remove_strike", description="Manually remove strikes from a query channel worker (Admin only).")
 @app_commands.describe(
@@ -215,6 +339,88 @@ async def remove_strike_slash(interaction: discord.Interaction, channel: discord
         await safe_respond(interaction, content=f"Successfully removed {removed} strike(s) from {target_channel.mention}. Reason: {reason}", ephemeral=True)
     else:
         await safe_respond(interaction, content=f"No active strikes to remove in {target_channel.mention}.", ephemeral=True)
+
+
+@bot.command(name="remove_strike")
+@commands.has_permissions(administrator=True)
+async def remove_strike_prefix(ctx: commands.Context, amount: int = 1, *, reason: str = "Admin manual removal"):
+    if not is_query_channel(ctx.channel):
+        await ctx.send("This command can only be used inside a query channel.")
+        return
+
+    removed = await strike_tracker.remove_strikes(ctx.channel, amount=amount, reason=reason, admin_user=ctx.author)
+    if removed > 0:
+        await ctx.send(f"Successfully removed {removed} strike(s) from {ctx.channel.mention}. Reason: {reason}")
+    else:
+        await ctx.send(f"No active strikes to remove in {ctx.channel.mention}.")
+
+
+# ----------------------------------------------------
+# RESEND DASHBOARD SLASH & PREFIX COMMANDS
+# ----------------------------------------------------
+
+from pinned_dashboard import resend_channel_dashboard
+
+async def _handle_resend_dashboard(interaction: discord.Interaction, channel: discord.TextChannel = None, all_channels: bool = False):
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
+
+    guild = interaction.guild
+    if not guild:
+        await safe_respond(interaction, content="This command must be used within a server.", ephemeral=True)
+        return
+
+    if all_channels:
+        count = 0
+        for ch in guild.text_channels:
+            if is_query_channel(ch):
+                await resend_channel_dashboard(ch)
+                count += 1
+        await safe_respond(interaction, content=f"Successfully resent dashboard panels in `{count}` query channel(s).", ephemeral=True)
+        return
+
+    target_channel = channel or interaction.channel
+    if not is_query_channel(target_channel):
+        await safe_respond(interaction, content="This command must target a query channel (`#-query` or `#-queries`).", ephemeral=True)
+        return
+
+    await resend_channel_dashboard(target_channel)
+    await safe_respond(interaction, content=f"Successfully resent and re-pinned dashboard panel in {target_channel.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="resend_dashboard", description="Resend and re-pin fresh dashboard panel(s) in query channel(s) (Admin only).")
+@app_commands.describe(
+    channel="Specific query channel to resend dashboard panel in (defaults to current channel)",
+    all_channels="Set to True to resend dashboard panels in ALL query channels"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def resend_dashboard_slash(interaction: discord.Interaction, channel: discord.TextChannel = None, all_channels: bool = False):
+    await _handle_resend_dashboard(interaction, channel=channel, all_channels=all_channels)
+
+
+@bot.tree.command(name="resend_panels", description="Resend and re-pin fresh dashboard panel(s) in query channel(s) (Admin only).")
+@app_commands.describe(
+    channel="Specific query channel to resend dashboard panel in (defaults to current channel)",
+    all_channels="Set to True to resend dashboard panels in ALL query channels"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def resend_panels_slash(interaction: discord.Interaction, channel: discord.TextChannel = None, all_channels: bool = False):
+    await _handle_resend_dashboard(interaction, channel=channel, all_channels=all_channels)
+
+
+@bot.command(name="resend_dashboard", aliases=["resend_panels", "resend_dashboard_panels"])
+@commands.has_permissions(administrator=True)
+async def resend_dashboard_prefix(ctx: commands.Context, channel: discord.TextChannel = None):
+    target_channel = channel or ctx.channel
+    if not is_query_channel(target_channel):
+        await ctx.send("This command must target a query channel (`#-query` or `#-queries`).")
+        return
+
+    await resend_channel_dashboard(target_channel)
+    await ctx.send(f"Successfully resent and re-pinned dashboard panel in {target_channel.mention}.")
 
 
 # ----------------------------------------------------
@@ -309,32 +515,47 @@ async def stop_speed_time_slash(interaction: discord.Interaction):
 # SLASH COMMANDS (/claim & /check)
 # ----------------------------------------------------
 
-@bot.tree.command(name="claim", description="Claim an influencer Instagram link and register them in the database.")
-@app_commands.describe(ig_link="The Instagram profile or post link of the influencer (e.g. instagram.com/username)")
-async def claim_slash(interaction: discord.Interaction, ig_link: str):
+@bot.tree.command(name="claim", description="Claim an influencer profile/link and register them in the database.")
+@app_commands.describe(
+    link="The profile link or handle of the influencer",
+    platform="Choose platform: Telegram, WhatsApp, Instagram, or Discord"
+)
+@app_commands.choices(platform=[
+    app_commands.Choice(name="Telegram", value="Telegram"),
+    app_commands.Choice(name="WhatsApp", value="WhatsApp"),
+    app_commands.Choice(name="Instagram", value="Instagram"),
+    app_commands.Choice(name="Discord", value="Discord"),
+])
+async def claim_slash(
+    interaction: discord.Interaction,
+    link: str,
+    platform: app_commands.Choice[str]
+):
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=False)
     except Exception:
         pass
     
-    clean_url = normalize_ig_link(ig_link)
-    if not clean_url or "instagram.com" not in clean_url:
-        await safe_respond(interaction, content=" **Invalid Instagram Link!** Please provide a valid Instagram URL (e.g. `https://instagram.com/username`).", ephemeral=True)
+    platform_str = platform.value if isinstance(platform, app_commands.Choice) else (platform or "Instagram")
+    clean_url = normalize_link(link)
+    if not clean_url:
+        await safe_respond(interaction, content=" **Invalid Link/Handle!** Please provide a valid URL or handle.", ephemeral=True)
         return
 
     referrer_name = f"{interaction.user.name} ({interaction.user.display_name})"
     channel_link = f"https://discord.com/channels/{interaction.guild_id}/{interaction.channel_id}"
 
     try:
-        existing = await sheets_manager.check_influencer(clean_url)
+        existing = await sheets_manager.check_influencer(clean_url, platform=platform_str)
         if existing:
             embed = discord.Embed(
                 title="Influencer Already Claimed!",
-                description=f"The Instagram link `{clean_url}` has already been registered in the database.",
+                description=f"The **[{existing.get('platform', platform_str)}]** link/handle `{clean_url}` has already been registered in the database.",
                 color=discord.Color.gold()
             )
-            embed.add_field(name="Instagram Link", value=clean_url, inline=False)
+            embed.add_field(name="Platform", value=existing.get("platform", platform_str), inline=True)
+            embed.add_field(name="Link / Handle", value=clean_url, inline=False)
             embed.add_field(name="Claimed By", value=existing.get("claimed_by", "Unknown"), inline=True)
             embed.add_field(name="Date Claimed", value=existing.get("claimed_at", "Unknown"), inline=True)
             if existing.get("channel_link"):
@@ -343,14 +564,15 @@ async def claim_slash(interaction: discord.Interaction, ig_link: str):
             await safe_respond(interaction, embed=embed)
             return
 
-        res = await sheets_manager.register_influencer(clean_url, referrer_name, channel_link)
+        res = await sheets_manager.register_influencer(clean_url, referrer_name, channel_link, platform=platform_str)
         
         embed = discord.Embed(
             title="Influencer Successfully Claimed!",
-            description=f"Successfully registered `{clean_url}` under **{referrer_name}**.",
+            description=f"Successfully registered **[{platform_str}]** `{clean_url}` under **{referrer_name}**.",
             color=discord.Color.green()
         )
-        embed.add_field(name="Instagram Link", value=clean_url, inline=False)
+        embed.add_field(name="Platform", value=platform_str, inline=True)
+        embed.add_field(name="Link / Handle", value=clean_url, inline=False)
         embed.add_field(name="Registered To", value=referrer_name, inline=True)
         embed.add_field(name="Claim Date", value=res.get("claimed_at"), inline=True)
         embed.set_footer(text="Google Sheets Database Updated")
@@ -358,7 +580,7 @@ async def claim_slash(interaction: discord.Interaction, ig_link: str):
         await safe_respond(interaction, embed=embed)
 
         await logger_service.log_claim(
-            bot, interaction.guild_id, clean_url, referrer_name, channel_link, res.get("claimed_at")
+            bot, interaction.guild_id, clean_url, referrer_name, channel_link, res.get("claimed_at"), platform=platform_str
         )
 
     except Exception as e:
@@ -366,29 +588,44 @@ async def claim_slash(interaction: discord.Interaction, ig_link: str):
         await safe_respond(interaction, content=f"Error accessing database: {str(e)}", ephemeral=True)
 
 
-@bot.tree.command(name="check", description="Check if an Instagram influencer has already been claimed.")
-@app_commands.describe(ig_link="The Instagram link to check in the database")
-async def check_slash(interaction: discord.Interaction, ig_link: str):
+@bot.tree.command(name="check", description="Check if an influencer has already been claimed in the database.")
+@app_commands.describe(
+    link="The profile link or handle to check in the database",
+    platform="Choose platform: Telegram, WhatsApp, Instagram, or Discord"
+)
+@app_commands.choices(platform=[
+    app_commands.Choice(name="Telegram", value="Telegram"),
+    app_commands.Choice(name="WhatsApp", value="WhatsApp"),
+    app_commands.Choice(name="Instagram", value="Instagram"),
+    app_commands.Choice(name="Discord", value="Discord"),
+])
+async def check_slash(
+    interaction: discord.Interaction,
+    link: str,
+    platform: app_commands.Choice[str] = None
+):
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=False)
     except Exception:
         pass
     
-    clean_url = normalize_ig_link(ig_link)
-    if not clean_url or "instagram.com" not in clean_url:
-        await safe_respond(interaction, content="Invalid Instagram Link! Please provide a valid Instagram URL.", ephemeral=True)
+    platform_str = platform.value if isinstance(platform, app_commands.Choice) else (platform or "Instagram")
+    clean_url = normalize_link(link)
+    if not clean_url:
+        await safe_respond(interaction, content="Invalid Link/Handle!", ephemeral=True)
         return
 
     try:
-        existing = await sheets_manager.check_influencer(clean_url)
+        existing = await sheets_manager.check_influencer(clean_url, platform=platform_str)
         if existing:
             embed = discord.Embed(
                 title="Influencer Already Claimed!",
-                description=f"The Instagram link `{clean_url}` is already claimed in the database.",
+                description=f"The **[{existing.get('platform', platform_str)}]** link/handle `{clean_url}` is already claimed in the database.",
                 color=discord.Color.gold()
             )
-            embed.add_field(name="Instagram Link", value=clean_url, inline=False)
+            embed.add_field(name="Platform", value=existing.get("platform", platform_str), inline=True)
+            embed.add_field(name="Link / Handle", value=clean_url, inline=False)
             embed.add_field(name="Claimed By", value=existing.get("claimed_by", "Unknown"), inline=True)
             embed.add_field(name="Date Claimed", value=existing.get("claimed_at", "Unknown"), inline=True)
             if existing.get("channel_link"):
@@ -397,10 +634,11 @@ async def check_slash(interaction: discord.Interaction, ig_link: str):
         else:
             embed = discord.Embed(
                 title="Influencer Unclaimed!",
-                description=f"No record found for `{clean_url}`. This influencer is **available to claim** using `/claim`!",
+                description=f"No record found for **[{platform_str}]** `{clean_url}`. Available to claim using `/claim`!",
                 color=discord.Color.green()
             )
-            embed.add_field(name="Instagram Link", value=clean_url, inline=False)
+            embed.add_field(name="Platform", value=platform_str, inline=True)
+            embed.add_field(name="Link / Handle", value=clean_url, inline=False)
             embed.set_footer(text="Database Check Complete • Available to Claim")
             await safe_respond(interaction, embed=embed)
     except Exception as e:
@@ -420,42 +658,46 @@ async def sync_prefix(ctx: commands.Context):
 
 
 @bot.command(name="claim")
-async def claim_prefix(ctx: commands.Context, ig_link: str = None):
-    if not ig_link:
-        await ctx.send("Usage: `!claim <instagram_link>`")
+async def claim_prefix(ctx: commands.Context, link: str = None, platform: str = "Instagram"):
+    if not link:
+        await ctx.send("Usage: `!claim <link_or_handle> [Telegram|WhatsApp|Instagram|Discord]`")
         return
-    clean_url = normalize_ig_link(ig_link)
-    if not clean_url or "instagram.com" not in clean_url:
-        await ctx.send("Invalid Instagram Link! Please provide a valid Instagram URL.")
-        return
+    clean_url = normalize_link(link)
+    platform_cap = platform.capitalize()
+    if platform_cap not in ["Telegram", "Whatsapp", "Instagram", "Discord"]:
+        platform_cap = "Instagram"
+    if platform_cap == "Whatsapp":
+        platform_cap = "WhatsApp"
 
     referrer_name = f"{ctx.author.name} ({ctx.author.display_name})"
     channel_link = f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}"
 
     try:
-        existing = await sheets_manager.check_influencer(clean_url)
+        existing = await sheets_manager.check_influencer(clean_url, platform=platform_cap)
         if existing:
             embed = discord.Embed(
                 title="Influencer Already Claimed!",
-                description=f"The Instagram link `{clean_url}` is already registered.",
+                description=f"The **[{existing.get('platform', platform_cap)}]** link/handle `{clean_url}` is already registered.",
                 color=discord.Color.gold()
             )
+            embed.add_field(name="Platform", value=existing.get("platform", platform_cap), inline=True)
             embed.add_field(name="Claimed By", value=existing.get("claimed_by", "Unknown"), inline=True)
             embed.add_field(name="Date Claimed", value=existing.get("claimed_at", "Unknown"), inline=True)
             await ctx.send(embed=embed)
             return
 
-        res = await sheets_manager.register_influencer(clean_url, referrer_name, channel_link)
+        res = await sheets_manager.register_influencer(clean_url, referrer_name, channel_link, platform=platform_cap)
         embed = discord.Embed(
             title="Influencer Successfully Claimed!",
-            description=f"Successfully registered `{clean_url}` under **{referrer_name}**.",
+            description=f"Successfully registered **[{platform_cap}]** `{clean_url}` under **{referrer_name}**.",
             color=discord.Color.green()
         )
+        embed.add_field(name="Platform", value=platform_cap, inline=True)
         embed.add_field(name="Claim Date", value=res.get("claimed_at"), inline=True)
         await ctx.send(embed=embed)
 
         await logger_service.log_claim(
-            bot, ctx.guild.id, clean_url, referrer_name, channel_link, res.get("claimed_at")
+            bot, ctx.guild.id, clean_url, referrer_name, channel_link, res.get("claimed_at"), platform=platform_cap
         )
 
     except Exception as e:
@@ -481,9 +723,14 @@ async def check_prefix(ctx: commands.Context, ig_link: str = None):
             )
             await ctx.send(embed=embed)
         else:
-# ----------------------------------------------------
-# DISCORD COMPONENTS V2 HELP COMMAND (/help & !help)
-# ----------------------------------------------------
+            embed = discord.Embed(
+                title="Influencer Unclaimed!",
+                description=f"`{clean_url}` is **available to claim** using `!claim` or `/claim`!",
+                color=discord.Color.green()
+            )
+            await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"Error checking database: {str(e)}")
 
 class HelpCategorySelect(discord.ui.Select):
     def __init__(self, current_category: str = "worker"):
@@ -532,9 +779,11 @@ def build_help_v2_layout(category: str = "worker") -> discord.ui.LayoutView:
     elif category == "strike_admin":
         container.add_item(discord.ui.TextDisplay(
             "- **__Admin Strike Management:__**\n"
-            "- **/remove_strike [channel] [amount] [reason]:** Manually remove active strikes from a query channel worker.\n"
+            "- **/add_strike [channel] [amount] [reason]:** Manually issue active strike(s) to a query channel worker.\n"
+            "- **/remove_strike [channel] [amount] [reason]:** Manually remove active strike(s) from a query channel worker.\n"
             "- **Undo Last Strike Button:** Click the red **Undo Last Strike** button on the query channel dashboard to revoke the latest strike.\n"
-            "- **Unclaim Channel Button:** Admins can unclaim a channel worker via the top dashboard button."
+            "- **Unclaim Channel Button:** Admins can unclaim a channel worker via the top dashboard button.\n"
+            "- **Prefix Commands:** `!add_strike <amount> <reason>` and `!remove_strike <amount> <reason>` are also supported."
         ))
     elif category == "setup_testing":
         container.add_item(discord.ui.TextDisplay(
@@ -635,20 +884,24 @@ async def before_strike_audit():
 @bot.event
 async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     """Fired instantly when a new channel is created in the server."""
-    if is_query_channel(channel):
+    if isinstance(channel, discord.TextChannel) and is_query_channel(channel):
         print(f" New query channel created: #{channel.name}. Instantly initializing V2 Dashboard!")
+        await asyncio.sleep(0.5)
         try:
-            await strike_tracker.initialize_channel(channel)
+            from pinned_dashboard import resend_channel_dashboard
+            await resend_channel_dashboard(channel)
         except Exception as e:
             print(f"Error initializing dashboard for new channel #{channel.name}: {e}")
 
 @bot.event
 async def on_guild_channel_update(before: discord.abc.GuildChannel, after: discord.abc.GuildChannel):
     """Fired instantly when a channel is renamed or updated."""
-    if is_query_channel(after) and not is_query_channel(before):
+    if isinstance(after, discord.TextChannel) and is_query_channel(after) and not is_query_channel(before):
         print(f" Channel renamed to query channel: #{after.name}. Instantly initializing V2 Dashboard!")
+        await asyncio.sleep(0.5)
         try:
-            await strike_tracker.initialize_channel(after)
+            from pinned_dashboard import resend_channel_dashboard
+            await resend_channel_dashboard(after)
         except Exception as e:
             print(f"Error initializing dashboard for updated channel #{after.name}: {e}")
 
@@ -661,7 +914,7 @@ async def on_message(message: discord.Message):
         print(f"Video detected in {message.channel.name} from {message.author.name}")
         await strike_tracker.handle_video_submission(message)
         try:
-            await message.add_reaction("")
+            await message.add_reaction("✅")
         except Exception:
             pass
 
@@ -690,7 +943,12 @@ async def on_ready():
         for ch in guild.text_channels:
             if is_query_channel(ch):
                 try:
-                    await strike_tracker.initialize_channel(ch)
+                    from pinned_dashboard import resend_channel_dashboard
+                    state = strike_tracker.channel_states.get(str(ch.id))
+                    if not state or not state.get("dashboard_msg_id"):
+                        await resend_channel_dashboard(ch)
+                    else:
+                        await strike_tracker.initialize_channel(ch)
                 except Exception as e:
                     print(f"Error initializing query channel #{ch.name} on startup: {e}")
 

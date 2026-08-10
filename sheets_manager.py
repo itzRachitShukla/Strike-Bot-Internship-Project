@@ -12,21 +12,23 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-def normalize_ig_link(url: str) -> str:
-    """Clean and normalize Instagram profile/post URL for comparison."""
+def normalize_link(url: str) -> str:
+    """Clean and normalize profile/post URL or handle for comparison."""
     if not url:
         return ""
     url = url.strip().split("?")[0].rstrip("/")
-    if not url.startswith("http://") and not url.startswith("https://"):
+    if not url.startswith("http://") and not url.startswith("https://") and ("/" in url or "." in url):
         url = "https://" + url
     return url.lower()
+
+normalize_ig_link = normalize_link
 
 class SheetsManager:
     def __init__(self, json_file=GOOGLE_SERVICE_ACCOUNT_FILE, spreadsheet_id=SPREADSHEET_ID):
         self.json_file = json_file
         self.spreadsheet_id = spreadsheet_id
         self._gc = None
-        self.bot = None # Optional bot reference for dispatching audit logs
+        self.bot = None
 
     def set_bot(self, bot):
         self.bot = bot
@@ -64,60 +66,81 @@ class SheetsManager:
             ws.append_row(default_headers)
         return ws
 
+    def _safe_get_records(self, ws, expected_headers: list):
+        """Safely gets all records from a worksheet, handling duplicate or empty header columns cleanly."""
+        try:
+            return ws.get_all_records(expected_headers=expected_headers)
+        except Exception:
+            values = ws.get_all_values()
+            if not values or len(values) < 2:
+                return []
+            header_row = [str(h).strip() for h in values[0]]
+            records = []
+            for row in values[1:]:
+                row_dict = {}
+                for idx, h in enumerate(expected_headers):
+                    if idx < len(row):
+                        row_dict[h] = row[idx]
+                    else:
+                        row_dict[h] = ""
+                records.append(row_dict)
+            return records
+
     # --- Influencers Logic ---
 
-    def _check_influencer_sync(self, ig_link: str):
-        clean_target = normalize_ig_link(ig_link)
-        headers = ["Instagram Link", "Claimed By", "Claimed At", "Channel Link"]
+    def _check_influencer_sync(self, link: str, platform: str = "Instagram"):
+        clean_target = normalize_link(link)
+        headers = ["Platform", "Link / Handle", "Claimed By", "Claimed At", "Channel Link"]
         ws = self._get_worksheet("Influencers", headers)
-        records = ws.get_all_records()
+        records = self._safe_get_records(ws, headers)
         for row in records:
-            existing_link = normalize_ig_link(str(row.get("Instagram Link", "")))
+            existing_link = normalize_link(str(row.get("Link / Handle", "") or row.get("Instagram Link", "")))
             if existing_link == clean_target:
                 return {
-                    "ig_link": row.get("Instagram Link"),
+                    "platform": row.get("Platform") or platform,
+                    "ig_link": row.get("Link / Handle") or row.get("Instagram Link"),
                     "claimed_by": row.get("Claimed By"),
                     "claimed_at": row.get("Claimed At"),
                     "channel_link": row.get("Channel Link")
                 }
         return None
 
-    async def check_influencer(self, ig_link: str):
-        return await asyncio.to_thread(self._execute_with_retry, self._check_influencer_sync, ig_link)
+    async def check_influencer(self, link: str, platform: str = "Instagram"):
+        return await asyncio.to_thread(self._execute_with_retry, self._check_influencer_sync, link, platform)
 
-    def _register_influencer_sync(self, ig_link: str, referrer: str, channel_link: str):
-        clean_target = normalize_ig_link(ig_link)
-        headers = ["Instagram Link", "Claimed By", "Claimed At", "Channel Link"]
+    def _register_influencer_sync(self, link: str, referrer: str, channel_link: str, platform: str = "Instagram"):
+        clean_target = normalize_link(link)
+        headers = ["Platform", "Link / Handle", "Claimed By", "Claimed At", "Channel Link"]
         ws = self._get_worksheet("Influencers", headers)
-        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        ws.append_row([clean_target, referrer, now_str, channel_link])
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        ws.append_row([platform, clean_target, referrer, now_str, channel_link])
         
-        # Dispatch audit log if bot reference exists
         if self.bot:
             from logger_service import logger_service
             asyncio.run_coroutine_threadsafe(
                 logger_service.log_worksheet_change(
-                    self.bot, None, "Influencers", f"Registered {clean_target}", f"Claimed by {referrer}", channel_link=channel_link
+                    self.bot, None, "Influencers", f"Registered [{platform}] {clean_target}", f"Claimed by {referrer}", channel_link=channel_link
                 ),
                 self.bot.loop
             )
             
         return {
+            "platform": platform,
             "ig_link": clean_target,
             "claimed_by": referrer,
             "claimed_at": now_str,
             "channel_link": channel_link
         }
 
-    async def register_influencer(self, ig_link: str, referrer: str, channel_link: str):
-        return await asyncio.to_thread(self._execute_with_retry, self._register_influencer_sync, ig_link, referrer, channel_link)
+    async def register_influencer(self, link: str, referrer: str, channel_link: str, platform: str = "Instagram"):
+        return await asyncio.to_thread(self._execute_with_retry, self._register_influencer_sync, link, referrer, channel_link, platform)
 
     # --- Staff Strikes Logic ---
 
     def _get_all_staff_records_sync(self):
         headers = ["Worker Username", "Worker User ID", "Channel ID", "Channel Link", "Active Strikes", "Strike 1 Date", "Strike 2 Date", "Strike 3 Date", "Last Video Date"]
         ws = self._get_worksheet("Staff Strikes", headers)
-        return ws.get_all_records()
+        return self._safe_get_records(ws, headers)
 
     async def get_all_staff_records(self):
         return await asyncio.to_thread(self._execute_with_retry, self._get_all_staff_records_sync)
@@ -125,7 +148,7 @@ class SheetsManager:
     def _update_staff_record_sync(self, channel_id: str, worker_name: str, worker_user_id: str, channel_link: str, active_strikes: int, s1_date: str, s2_date: str, s3_date: str, last_video_date: str):
         headers = ["Worker Username", "Worker User ID", "Channel ID", "Channel Link", "Active Strikes", "Strike 1 Date", "Strike 2 Date", "Strike 3 Date", "Last Video Date"]
         ws = self._get_worksheet("Staff Strikes", headers)
-        records = ws.get_all_records()
+        records = self._safe_get_records(ws, headers)
         
         row_index = None
         for i, row in enumerate(records, start=2):
@@ -170,7 +193,7 @@ class SheetsManager:
     def _get_dm_record_sync(self, channel_id: str):
         headers = ["Worker Username", "Channel ID", "Channel Link", "Day 1 DMs", "Day 2 DMs", "Day 3 DMs", "Day 4 DMs", "Day 5 DMs", "Day 6 DMs", "Day 7 DMs", "Total DMs"]
         ws = self._get_worksheet("Daily DM Logs", headers)
-        records = ws.get_all_records()
+        records = self._safe_get_records(ws, headers)
         for row in records:
             if str(row.get("Channel ID", "")) == str(channel_id):
                 return row
@@ -182,7 +205,7 @@ class SheetsManager:
     def _update_dm_record_sync(self, channel_id: str, worker_name: str, channel_link: str, day_num: int, dm_count: int):
         headers = ["Worker Username", "Channel ID", "Channel Link", "Day 1 DMs", "Day 2 DMs", "Day 3 DMs", "Day 4 DMs", "Day 5 DMs", "Day 6 DMs", "Day 7 DMs", "Total DMs"]
         ws = self._get_worksheet("Daily DM Logs", headers)
-        records = ws.get_all_records()
+        records = self._safe_get_records(ws, headers)
         
         row_index = None
         current_row = {}
