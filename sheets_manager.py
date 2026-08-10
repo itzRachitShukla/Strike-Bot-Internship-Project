@@ -135,18 +135,41 @@ class SheetsManager:
     async def register_influencer(self, link: str, referrer: str, channel_link: str, platform: str = "Instagram"):
         return await asyncio.to_thread(self._execute_with_retry, self._register_influencer_sync, link, referrer, channel_link, platform)
 
-    # --- Staff Strikes Logic ---
+    # --- Staff Strikes & Audit Log Logic ---
 
     def _get_all_staff_records_sync(self):
-        headers = ["Worker Username", "Worker User ID", "Channel ID", "Channel Link", "Active Strikes", "Strike 1 Date", "Strike 2 Date", "Strike 3 Date", "Last Video Date"]
+        headers = [
+            "Worker Username", "Worker User ID", "Channel ID", "Channel Link",
+            "Active Strikes", "Strike 1 Date", "Strike 1 Reason", "Strike 2 Date",
+            "Strike 2 Reason", "Strike 3 Date", "Strike 3 Reason", "Last Video Date", "Last Action By Admin"
+        ]
         ws = self._get_worksheet("Staff Strikes", headers)
         return self._safe_get_records(ws, headers)
 
     async def get_all_staff_records(self):
         return await asyncio.to_thread(self._execute_with_retry, self._get_all_staff_records_sync)
 
-    def _update_staff_record_sync(self, channel_id: str, worker_name: str, worker_user_id: str, channel_link: str, active_strikes: int, s1_date: str, s2_date: str, s3_date: str, last_video_date: str):
-        headers = ["Worker Username", "Worker User ID", "Channel ID", "Channel Link", "Active Strikes", "Strike 1 Date", "Strike 2 Date", "Strike 3 Date", "Last Video Date"]
+    def _update_staff_record_sync(
+        self,
+        channel_id: str,
+        worker_name: str,
+        worker_user_id: str,
+        channel_link: str,
+        active_strikes: int,
+        s1_date: str,
+        s2_date: str,
+        s3_date: str,
+        last_video_date: str,
+        s1_reason: str = "",
+        s2_reason: str = "",
+        s3_reason: str = "",
+        last_admin: str = ""
+    ):
+        headers = [
+            "Worker Username", "Worker User ID", "Channel ID", "Channel Link",
+            "Active Strikes", "Strike 1 Date", "Strike 1 Reason", "Strike 2 Date",
+            "Strike 2 Reason", "Strike 3 Date", "Strike 3 Reason", "Last Video Date", "Last Action By Admin"
+        ]
         ws = self._get_worksheet("Staff Strikes", headers)
         records = self._safe_get_records(ws, headers)
         
@@ -163,13 +186,17 @@ class SheetsManager:
             channel_link,
             active_strikes,
             s1_date or "",
+            s1_reason or "",
             s2_date or "",
+            s2_reason or "",
             s3_date or "",
-            last_video_date or ""
+            s3_reason or "",
+            last_video_date or "",
+            last_admin or ""
         ]
         
         if row_index:
-            range_name = f"A{row_index}:I{row_index}"
+            range_name = f"A{row_index}:M{row_index}"
             ws.update(range_name, [row_data])
         else:
             ws.append_row(row_data)
@@ -183,9 +210,26 @@ class SheetsManager:
                 self.bot.loop
             )
 
-    async def update_staff_record(self, channel_id: str, worker_name: str, worker_user_id: str, channel_link: str, active_strikes: int, s1_date: str, s2_date: str, s3_date: str, last_video_date: str):
+    async def update_staff_record(
+        self,
+        channel_id: str,
+        worker_name: str,
+        worker_user_id: str,
+        channel_link: str,
+        active_strikes: int,
+        s1_date: str,
+        s2_date: str,
+        s3_date: str,
+        last_video_date: str,
+        s1_reason: str = "",
+        s2_reason: str = "",
+        s3_reason: str = "",
+        last_admin: str = ""
+    ):
         return await asyncio.to_thread(
-            self._execute_with_retry, self._update_staff_record_sync, channel_id, worker_name, worker_user_id, channel_link, active_strikes, s1_date, s2_date, s3_date, last_video_date
+            self._execute_with_retry,
+            self._update_staff_record_sync,
+            channel_id, worker_name, worker_user_id, channel_link, active_strikes, s1_date, s2_date, s3_date, last_video_date, s1_reason, s2_reason, s3_reason, last_admin
         )
 
     # --- Daily DM Logs Logic ---
