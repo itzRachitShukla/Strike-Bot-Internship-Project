@@ -14,6 +14,27 @@ def is_query_channel(channel) -> bool:
     return name.endswith("-query") or name.endswith("-queries")
 
 
+def format_datetime_custom(dt_val) -> str:
+    """Formats a datetime object or date string as '26 Jun 2:30 pm'."""
+    if not dt_val:
+        return ""
+    if isinstance(dt_val, str):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d %b %I:%M %p"):
+            try:
+                clean_str = dt_val.replace(" IST", "").replace(" UTC", "").strip()
+                dt_val = datetime.strptime(clean_str, fmt)
+                break
+            except Exception:
+                pass
+        if isinstance(dt_val, str):
+            return dt_val
+
+    hour_12 = dt_val.strftime("%I").lstrip("0")
+    if not hour_12:
+        hour_12 = "12"
+    return f"{dt_val.day} {dt_val.strftime('%b')} {hour_12}:{dt_val.strftime('%M')} {dt_val.strftime('%p').lower()}"
+
+
 def is_video_message(message: discord.Message) -> bool:
     """Returns True if message contains a playable video attachment or video link."""
     video_extensions = ('.mp4', '.mov', '.webm', '.m4v', '.mkv', '.avi', '.wmv')
@@ -75,14 +96,15 @@ class StrikeTracker:
             return f"<@{worker_user_id}>"
         return f"**{state.get('worker_name', channel.name)}**"
 
-    async def initialize_channel(self, channel):
+    async def initialize_channel(self, channel, send_dashboard: bool = True):
         """Loads state from Google Sheets or initializes default state for a query channel."""
         channel_id = str(channel.id)
         if channel_id in self.channel_states:
-            st = self.channel_states[channel_id]
-            await update_pinned_dashboard(
-                channel, st["worker_name"], st.get("worker_user_id"), st["active_strikes"], st["strike_dates"], st["last_video_dt"]
-            )
+            if send_dashboard:
+                st = self.channel_states[channel_id]
+                await update_pinned_dashboard(
+                    channel, st["worker_name"], st.get("worker_user_id"), st["active_strikes"], st["strike_dates"], st["last_video_dt"]
+                )
             return
 
         records = await sheets_manager.get_all_staff_records()
@@ -95,7 +117,7 @@ class StrikeTracker:
         if record:
             worker_name = record.get("Worker Username", channel.name.replace("-query", "").replace("-queries", "").capitalize())
             worker_user_id = str(record.get("Worker User ID", "")) or None
-            active_strikes = int(record.get("Active Strikes", 0) or 0)
+            active_strikes = min(int(record.get("Active Strikes", 0) or 0), 3)
             
             strike_dates = []
             strike_reasons = []
@@ -142,12 +164,14 @@ class StrikeTracker:
             "last_video_dt": last_video_dt,
             "claim_dt": claim_dt,
             "time_offset_hours": 0.0,
-            "dashboard_msg_id": None
+            "dashboard_msg_id": None,
+            "clean_streak_start": None
         }
 
-        await update_pinned_dashboard(
-            channel, worker_name, worker_user_id, active_strikes, strike_dates, last_video_dt
-        )
+        if send_dashboard:
+            await update_pinned_dashboard(
+                channel, worker_name, worker_user_id, active_strikes, strike_dates, last_video_dt
+            )
 
     async def claim_channel_worker(self, channel, user: discord.User) -> bool:
         channel_id = str(channel.id)
@@ -156,7 +180,7 @@ class StrikeTracker:
 
         state = self.channel_states[channel_id]
         now = self._get_effective_now(channel_id)
-        now_str = now.strftime("%Y-%m-%d %H:%M:%S IST")
+        now_str = format_datetime_custom(now)
 
         state["worker_name"] = user.name
         state["worker_user_id"] = str(user.id)
@@ -180,9 +204,8 @@ class StrikeTracker:
             channel_link=channel_link,
             active_strikes=state["active_strikes"],
             s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
-            last_video_date=state["last_video_dt"].strftime("%Y-%m-%d %H:%M:%S IST") if state["last_video_dt"] else "",
-            s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r,
-            claim_date=now_str
+            last_video_date=format_datetime_custom(state["last_video_dt"]),
+            s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r
         )
 
         await update_pinned_dashboard(
@@ -227,9 +250,8 @@ class StrikeTracker:
             channel_link=channel_link,
             active_strikes=state["active_strikes"],
             s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
-            last_video_date=state["last_video_dt"].strftime("%Y-%m-%d %H:%M:%S IST") if state["last_video_dt"] else "",
+            last_video_date=format_datetime_custom(state["last_video_dt"]),
             s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r,
-            claim_date="",
             last_admin=admin_info
         )
 
@@ -243,20 +265,74 @@ class StrikeTracker:
 
         return True
 
-    async def add_strikes(self, channel, amount: int = 1, reason: str = "Admin manual addition", admin_user: discord.User = None) -> int:
-        """Manually adds strikes to a channel worker (Admin action)."""
+    async def reset_channel_dashboard(self, channel, admin_user: discord.User = None) -> bool:
+        """Completely resets channel dashboard state, strikes, and worker assignment (Admin action)."""
         channel_id = str(channel.id)
         if channel_id not in self.channel_states:
             await self.initialize_channel(channel)
 
         state = self.channel_states[channel_id]
-        now = self._get_effective_now(channel_id)
-        now_str = now.strftime("%Y-%m-%d %H:%M:%S IST")
+        default_name = channel.name.replace("-query", "").replace("-queries", "").capitalize()
+        
+        state["worker_name"] = default_name
+        state["worker_user_id"] = None
+        state["claim_dt"] = None
+        state["active_strikes"] = 0
+        state["strike_dates"] = []
+        state["strike_reasons"] = []
+        state["last_video_dt"] = None
+        state["clean_streak_start"] = None
 
+        channel_link = f"https://discord.com/channels/{channel.guild.id}/{channel.id}"
+        admin_info = f"Reset by {admin_user.name} ({admin_user.id})" if admin_user else "System Reset"
+
+        await sheets_manager.update_staff_record(
+            channel_id=channel_id,
+            worker_name=default_name,
+            worker_user_id="",
+            channel_link=channel_link,
+            active_strikes=0,
+            s1_date="", s2_date="", s3_date="",
+            last_video_date="",
+            s1_reason="", s2_reason="", s3_reason="",
+            last_admin=admin_info
+        )
+
+        await update_pinned_dashboard(
+            channel, default_name, None, 0, [], None
+        )
+
+        if self.bot and hasattr(channel, "guild") and channel.guild:
+            from logger_service import logger_service
+            await logger_service.log_strike(
+                self.bot, channel.guild.id, default_name, channel_link, "RESET_ADMIN", 0, "Dashboard reset by admin", reason="Manual Reset", admin_user=admin_user
+            )
+
+        return True
+
+    async def add_strikes(self, channel, amount: int = 1, reason: str = "Admin manual addition", admin_user: discord.User = None) -> int:
+        """Manually adds strikes to a channel worker (Admin action), capped at max 3 active strikes."""
+        channel_id = str(channel.id)
+        if channel_id not in self.channel_states:
+            await self.initialize_channel(channel)
+
+        state = self.channel_states[channel_id]
+        if state["active_strikes"] >= 3:
+            return 0
+
+        now = self._get_effective_now(channel_id)
+        now_str = format_datetime_custom(now)
+
+        actual_added = 0
         for _ in range(amount):
-            state["active_strikes"] += 1
-            state["strike_dates"].append(now_str)
-            state["strike_reasons"].append(reason)
+            if state["active_strikes"] < 3:
+                state["active_strikes"] += 1
+                state["strike_dates"].append(now_str)
+                state["strike_reasons"].append(reason)
+                actual_added += 1
+
+        if actual_added == 0:
+            return 0
 
         channel_link = f"https://discord.com/channels/{channel.guild.id}/{channel.id}"
         s_dates = state["strike_dates"]
@@ -278,7 +354,7 @@ class StrikeTracker:
             channel_link=channel_link,
             active_strikes=state["active_strikes"],
             s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
-            last_video_date=state["last_video_dt"].strftime("%Y-%m-%d %H:%M:%S IST") if state["last_video_dt"] else "",
+            last_video_date=format_datetime_custom(state["last_video_dt"]),
             s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r,
             last_admin=admin_info
         )
@@ -289,7 +365,7 @@ class StrikeTracker:
 
         worker_tag = self._get_worker_tag(channel, state)
         admin_mention = f" by {admin_user.mention}" if admin_user else ""
-        details_str = f"Manually issued {amount} strike(s){admin_mention}"
+        details_str = f"Manually issued {actual_added} strike(s){admin_mention}"
         
         # Send channel notification
         try:
@@ -301,7 +377,7 @@ class StrikeTracker:
                 warning_msg = ""
 
             await channel.send(
-                f"**STRIKE ISSUED!** {worker_tag} has received **{amount} strike(s)**{admin_mention}. "
+                f"**STRIKE ISSUED!** {worker_tag} has received **{actual_added} strike(s)**{admin_mention}. "
                 f"Active Strikes: `{state['active_strikes']}/3`. Reason: {reason}{warning_msg}"
             )
         except Exception as e:
@@ -317,7 +393,7 @@ class StrikeTracker:
                     self.bot, channel.guild.id, worker_tag, channel_link, state["active_strikes"], details_str, reason=reason, admin_user=admin_user
                 )
 
-        return amount
+        return actual_added
 
     async def remove_strikes(self, channel, amount: int = 1, reason: str = "Admin manual removal", admin_user: discord.User = None) -> int:
         """Manually removes strikes from a channel worker (Admin action)."""
@@ -357,7 +433,7 @@ class StrikeTracker:
             channel_link=channel_link,
             active_strikes=state["active_strikes"],
             s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
-            last_video_date=state["last_video_dt"].strftime("%Y-%m-%d %H:%M:%S IST") if state["last_video_dt"] else "",
+            last_video_date=format_datetime_custom(state["last_video_dt"]),
             s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r,
             last_admin=admin_info
         )
@@ -409,7 +485,7 @@ class StrikeTracker:
             channel_link=channel_link,
             active_strikes=state["active_strikes"],
             s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
-            last_video_date=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+            last_video_date=format_datetime_custom(now),
             s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r
         )
 
@@ -426,13 +502,14 @@ class StrikeTracker:
         now = self._get_effective_now(channel_id)
         last_vid = state["last_video_dt"]
         window_start, window_end = get_current_window_bounds(now)
+        channel_link = f"https://discord.com/channels/{channel.guild.id}/{channel.id}"
 
         # Check 1 AM - 1 AM IST window deadline breach for claimed channel
         if state.get("worker_user_id"):
             has_video_in_window = (last_vid is not None and last_vid >= window_start)
-            if not has_video_in_window:
+            if not has_video_in_window and state["active_strikes"] < 3:
                 state["active_strikes"] += 1
-                now_str = now.strftime("%Y-%m-%d %H:%M:%S IST")
+                now_str = format_datetime_custom(now)
                 reason_str = "Missing daily screen recording submission before 1:00 AM IST"
                 state["strike_dates"].append(now_str)
                 state["strike_reasons"].append(reason_str)
@@ -448,7 +525,6 @@ class StrikeTracker:
                 s2_r = s_reasons[1] if len(s_reasons) > 1 else ""
                 s3_r = s_reasons[2] if len(s_reasons) > 2 else ""
 
-                channel_link = f"https://discord.com/channels/{channel.guild.id}/{channel.id}"
                 await sheets_manager.update_staff_record(
                     channel_id=channel_id,
                     worker_name=state["worker_name"],
@@ -456,7 +532,7 @@ class StrikeTracker:
                     channel_link=channel_link,
                     active_strikes=state["active_strikes"],
                     s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
-                    last_video_date=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+                    last_video_date=format_datetime_custom(now),
                     s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r,
                     last_admin="System (Deadline)"
                 )
@@ -494,50 +570,59 @@ class StrikeTracker:
                             bot, channel.guild.id, worker_tag, channel_link, state["active_strikes"], details_str, reason=reason_str
                         )
 
-        # Check 7-Day Clean Streak Auto-Revocation
-        if state["active_strikes"] > 0 and state["strike_dates"]:
+        # Check 7-Day Clean Streak Auto-Revocation (Applies to 1 or 2 strikes only; 3 strikes require admin action)
+        if 0 < state["active_strikes"] < 3 and state["strike_dates"]:
             latest_strike_str = state["strike_dates"][-1]
             try:
-                latest_strike_dt = datetime.strptime(latest_strike_str, "%Y-%m-%d %H:%M:%S IST")
-                days_since_strike = (now - latest_strike_dt).total_seconds() / 86400.0
-                if days_since_strike >= 7.0:
-                    print(f"Clean streak reached for {channel.name}. Revoking {state['active_strikes']} active strike(s)!")
-                    prev_strikes = state["active_strikes"]
-                    state["active_strikes"] = 0
-                    state["strike_dates"] = []
-                    state["strike_reasons"] = []
-
-                    channel_link = f"https://discord.com/channels/{channel.guild.id}/{channel.id}"
-                    await sheets_manager.update_staff_record(
-                        channel_id=channel_id,
-                        worker_name=state["worker_name"],
-                        worker_user_id=state.get("worker_user_id") or "",
-                        channel_link=channel_link,
-                        active_strikes=0,
-                        s1_date="", s2_date="", s3_date="",
-                        last_video_date=state["last_video_dt"].strftime("%Y-%m-%d %H:%M:%S IST") if state["last_video_dt"] else "",
-                        s1_reason="", s2_reason="", s3_reason="",
-                        last_admin="System (7-Day Revocation)"
-                    )
-
-                    await update_pinned_dashboard(
-                        channel, state["worker_name"], state.get("worker_user_id"), 0, [], state["last_video_dt"]
-                    )
-
-                    worker_tag = self._get_worker_tag(channel, state)
+                latest_strike_dt = None
+                clean_str = latest_strike_str.replace(" IST", "").replace(" UTC", "").strip()
+                for fmt in ("%d %b %I:%M %p", "%Y-%m-%d %H:%M:%S"):
                     try:
-                        await channel.send(
-                            f"🎉 **CLEAN STREAK REWARD!** {worker_tag} completed 7 consecutive days without a new strike. "
-                            f"All active strikes have been automatically revoked!"
-                        )
+                        latest_strike_dt = datetime.strptime(clean_str, fmt)
+                        if fmt == "%d %b %I:%M %p":
+                            latest_strike_dt = latest_strike_dt.replace(year=now.year)
+                        break
                     except Exception:
                         pass
+                if latest_strike_dt:
+                    days_since_strike = (now - latest_strike_dt).total_seconds() / 86400.0
+                    if days_since_strike >= 7.0:
+                        print(f"Clean streak reached for {channel.name}. Revoking {state['active_strikes']} active strike(s)!")
+                        prev_strikes = state["active_strikes"]
+                        state["active_strikes"] = 0
+                        state["strike_dates"] = []
+                        state["strike_reasons"] = []
 
-                    if self.bot:
-                        from logger_service import logger_service
-                        await logger_service.log_strike(
-                            bot, channel.guild.id, worker_tag, channel_link, "REVOKED_7DAY", 0, f"Revoked {prev_strikes} strike(s) after 7 clean days."
+                        await sheets_manager.update_staff_record(
+                            channel_id=channel_id,
+                            worker_name=state["worker_name"],
+                            worker_user_id=state.get("worker_user_id") or "",
+                            channel_link=channel_link,
+                            active_strikes=0,
+                            s1_date="", s2_date="", s3_date="",
+                            last_video_date=format_datetime_custom(state["last_video_dt"]),
+                            s1_reason="", s2_reason="", s3_reason="",
+                            last_admin="System (7-Day Revocation)"
                         )
+
+                        await update_pinned_dashboard(
+                            channel, state["worker_name"], state.get("worker_user_id"), 0, [], state["last_video_dt"]
+                        )
+
+                        worker_tag = self._get_worker_tag(channel, state)
+                        try:
+                            await channel.send(
+                                f"**CLEAN STREAK REWARD!** {worker_tag} completed 7 consecutive days without a new strike. "
+                                f"All active strikes have been automatically revoked!"
+                            )
+                        except Exception:
+                            pass
+
+                        if self.bot:
+                            from logger_service import logger_service
+                            await logger_service.log_strike(
+                                bot, channel.guild.id, worker_tag, channel_link, "REVOKED_7DAY", 0, f"Revoked {prev_strikes} strike(s) after 7 clean days."
+                            )
             except Exception as e:
                 print(f"Error checking clean streak in {channel.name}: {e}")
 

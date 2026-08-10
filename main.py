@@ -41,15 +41,26 @@ def parse_time_string_to_hours(time_str: str) -> float:
 
 
 # Helper function to safely send interaction responses even if interaction expired or was deferred
-async def safe_respond(interaction: discord.Interaction, content: str = None, embed: discord.Embed = None, ephemeral: bool = False):
+async def safe_respond(interaction: discord.Interaction, content: str = None, embed: discord.Embed = None, view: discord.ui.View = None, ephemeral: bool = False):
     try:
+        kwargs = {}
+        if content is not None:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if view is not None:
+            kwargs["view"] = view
+        kwargs["ephemeral"] = ephemeral
+
         if interaction.response.is_done():
-            await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+            await interaction.followup.send(**kwargs)
         else:
-            await interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+            await interaction.response.send_message(**kwargs)
     except discord.NotFound:
         if interaction.channel:
-            await interaction.channel.send(content=content, embed=embed)
+            if "ephemeral" in kwargs:
+                del kwargs["ephemeral"]
+            await interaction.channel.send(**kwargs)
     except Exception as e:
         print(f"Error sending safe_respond: {e}")
 
@@ -128,10 +139,22 @@ class LogChannelSelect(discord.ui.ChannelSelect):
     async def callback(self, interaction: discord.Interaction):
         selected_ch = self.values[0]
         logger_service.set_log_channel(self.category, selected_ch.id)
+
+        if interaction.guild and isinstance(selected_ch, discord.TextChannel):
+            admin_overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False, view_channel=False)
+            }
+            for role in interaction.guild.roles:
+                if role.permissions.administrator and not role.is_default():
+                    admin_overwrites[role] = discord.PermissionOverwrite(read_messages=True, view_channel=True)
+            try:
+                await selected_ch.edit(overwrites=admin_overwrites)
+            except Exception as pe:
+                print(f"Warning setting admin-only overwrites on #{selected_ch.name}: {pe}")
         
         embed = build_setup_logs_embed(active_category=self.category)
         await interaction.response.edit_message(embed=embed, view=SetupLogsView(active_category=self.category))
-        await interaction.followup.send(f"Configured **{self.category.replace('_', ' ').title()}** log channel to {selected_ch.mention}.", ephemeral=True)
+        await interaction.followup.send(f"Configured **{self.category.replace('_', ' ').title()}** log channel to {selected_ch.mention} (Admin-only view access set).", ephemeral=True)
 
 
 class PingTargetSelect(discord.ui.MentionableSelect):
@@ -166,6 +189,15 @@ class AutoSetupLogsButton(discord.ui.Button):
         if not guild:
             return
 
+        # Build Administrator-Only Permission Overwrites:
+        # Deny @everyone, and grant explicit view permission to administrator roles
+        admin_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False, view_channel=False)
+        }
+        for role in guild.roles:
+            if role.permissions.administrator and not role.is_default():
+                admin_overwrites[role] = discord.PermissionOverwrite(read_messages=True, view_channel=True)
+
         # 1. Search for any existing audit log category in the guild (case-insensitive)
         category = None
         for cat in guild.categories:
@@ -174,13 +206,18 @@ class AutoSetupLogsButton(discord.ui.Button):
                 category = cat
                 break
 
-        # If no audit category exists at all, create "AUDIT LOGS"
+        # If no audit category exists at all, create "AUDIT LOGS" with admin-only overwrites
         if not category:
             try:
-                category = await guild.create_category("AUDIT LOGS")
+                category = await guild.create_category("AUDIT LOGS", overwrites=admin_overwrites)
             except Exception as e:
                 await interaction.followup.send(f"Error creating category: {e}", ephemeral=True)
                 return
+        else:
+            try:
+                await category.edit(overwrites=admin_overwrites)
+            except Exception as pe:
+                print(f"Warning updating category overwrites: {pe}")
 
         # 2. Define flexible channel keywords for matching pre-existing channels
         channel_spec = {
@@ -246,7 +283,7 @@ class AutoSetupLogsButton(discord.ui.Button):
             # Only if channel is still nowhere to be found, create a new text channel
             if not ch:
                 try:
-                    ch = await category.create_text_channel(default_ch_name)
+                    ch = await category.create_text_channel(default_ch_name, overwrites=admin_overwrites)
                     newly_created_count += 1
                     status_tag = "(Newly Created)"
                 except Exception as e:
@@ -255,6 +292,10 @@ class AutoSetupLogsButton(discord.ui.Button):
             else:
                 existing_count += 1
                 status_tag = "(Already Exists)"
+                try:
+                    await ch.edit(overwrites=admin_overwrites)
+                except Exception as pe:
+                    print(f"Warning applying admin overwrites to #{ch.name}: {pe}")
 
             logger_service.set_log_channel(cat_key, ch.id)
             created_text.append(f"• **{cat_key.replace('_', ' ').title()}**: {ch.mention} `{status_tag}`")
@@ -391,16 +432,6 @@ async def _handle_resend_dashboard(interaction: discord.Interaction, channel: di
     await safe_respond(interaction, content=f"Successfully resent and re-pinned dashboard panel in {target_channel.mention}.", ephemeral=True)
 
 
-@bot.tree.command(name="resend_dashboard", description="Resend and re-pin fresh dashboard panel(s) in query channel(s) (Admin only).")
-@app_commands.describe(
-    channel="Specific query channel to resend dashboard panel in (defaults to current channel)",
-    all_channels="Set to True to resend dashboard panels in ALL query channels"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def resend_dashboard_slash(interaction: discord.Interaction, channel: discord.TextChannel = None, all_channels: bool = False):
-    await _handle_resend_dashboard(interaction, channel=channel, all_channels=all_channels)
-
-
 @bot.tree.command(name="resend_panels", description="Resend and re-pin fresh dashboard panel(s) in query channel(s) (Admin only).")
 @app_commands.describe(
     channel="Specific query channel to resend dashboard panel in (defaults to current channel)",
@@ -411,9 +442,9 @@ async def resend_panels_slash(interaction: discord.Interaction, channel: discord
     await _handle_resend_dashboard(interaction, channel=channel, all_channels=all_channels)
 
 
-@bot.command(name="resend_dashboard", aliases=["resend_panels", "resend_dashboard_panels"])
+@bot.command(name="resend_panels", aliases=["resend_dashboard"])
 @commands.has_permissions(administrator=True)
-async def resend_dashboard_prefix(ctx: commands.Context, channel: discord.TextChannel = None):
+async def resend_panels_prefix(ctx: commands.Context, channel: discord.TextChannel = None):
     target_channel = channel or ctx.channel
     if not is_query_channel(target_channel):
         await ctx.send("This command must target a query channel (`#-query` or `#-queries`).")
@@ -512,24 +543,110 @@ async def stop_speed_time_slash(interaction: discord.Interaction):
 
 
 # ----------------------------------------------------
+# COMPONENTS V2 LAYOUT VIEWS FOR CLAIMS & CHECKS
+# ----------------------------------------------------
+
+class ClaimSuccessView(discord.ui.LayoutView):
+    def __init__(self, platform: str, clean_url: str, referrer_mention: str, claimed_at: str, geo: str = "US"):
+        super().__init__(timeout=None)
+        container = discord.ui.Container(accent_color=discord.Color.green())
+        container.add_item(discord.ui.TextDisplay("## Influencer Successfully Claimed!"))
+        container.add_item(discord.ui.Separator())
+        details_text = (
+            f"Successfully registered **{platform}** `{clean_url}` under {referrer_mention}.\n\n"
+            f"- **Social Link:** `{clean_url}`\n"
+            f"- **Referred By:** {referrer_mention}\n"
+            f"- **GEO:** **{geo}**\n"
+            f"- **Platform:** **{platform}**\n"
+            f"- **Claim Date:** `{claimed_at}`"
+        )
+        container.add_item(discord.ui.TextDisplay(details_text))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay("*Google Sheets Database Updated*"))
+        self.add_item(container)
+
+
+class AlreadyClaimedView(discord.ui.LayoutView):
+    def __init__(self, platform: str, clean_url: str, claimed_by: str, claimed_at: str, channel_link: str = None, geo: str = None):
+        super().__init__(timeout=None)
+        container = discord.ui.Container(accent_color=discord.Color.gold())
+        container.add_item(discord.ui.TextDisplay("## Influencer Already Claimed!"))
+        container.add_item(discord.ui.Separator())
+        
+        claimed_by_str = claimed_by if (claimed_by and claimed_by.startswith("<@")) else f"**{claimed_by}**"
+        
+        details_text = (
+            f"The **{platform}** link/handle `{clean_url}` has already been registered in the database.\n\n"
+            f"- **Social Link:** `{clean_url}`\n"
+            f"- **Referred By:** {claimed_by_str}\n"
+            f"- **Platform:** **{platform}**\n"
+            f"- **Date Claimed:** `{claimed_at}`"
+        )
+        if geo:
+            details_text += f"\n- **GEO:** **{geo}**"
+        if channel_link:
+            details_text += f"\n- **Channel Link:** {channel_link}"
+        container.add_item(discord.ui.TextDisplay(details_text))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay("*Database Verification Complete*"))
+        self.add_item(container)
+
+
+class UnclaimedView(discord.ui.LayoutView):
+    def __init__(self, platform: str, clean_url: str):
+        super().__init__(timeout=None)
+        container = discord.ui.Container(accent_color=discord.Color.green())
+        container.add_item(discord.ui.TextDisplay("## Influencer Unclaimed!"))
+        container.add_item(discord.ui.Separator())
+        platform_str = f" **{platform}**" if platform else ""
+        details_text = (
+            f"No record found for{platform_str} `{clean_url}`.\n\n"
+            f"- **Status:** Available to Claim\n"
+            f"- **Social Link:** `{clean_url}`"
+        )
+        if platform:
+            details_text += f"\n- **Platform Checked:** **{platform}**"
+        container.add_item(discord.ui.TextDisplay(details_text))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay("*Database Check Complete • Available to Claim via /claim*"))
+        self.add_item(container)
+
+
+# ----------------------------------------------------
 # SLASH COMMANDS (/claim & /check)
 # ----------------------------------------------------
 
 @bot.tree.command(name="claim", description="Claim an influencer profile/link and register them in the database.")
 @app_commands.describe(
     link="The profile link or handle of the influencer",
-    platform="Choose platform: Telegram, WhatsApp, Instagram, or Discord"
+    gc="Choose platform: Telegram, WhatsApp, Instagram, or Discord",
+    geo="Choose or type creator GEO/country (e.g. US, IN, UK, CA, AU, DE, FR, BR, JP)"
 )
-@app_commands.choices(platform=[
-    app_commands.Choice(name="Telegram", value="Telegram"),
-    app_commands.Choice(name="WhatsApp", value="WhatsApp"),
-    app_commands.Choice(name="Instagram", value="Instagram"),
-    app_commands.Choice(name="Discord", value="Discord"),
-])
+@app_commands.choices(
+    gc=[
+        app_commands.Choice(name="Telegram", value="Telegram"),
+        app_commands.Choice(name="WhatsApp", value="WhatsApp"),
+        app_commands.Choice(name="Instagram", value="Instagram"),
+        app_commands.Choice(name="Discord", value="Discord"),
+    ],
+    geo=[
+        app_commands.Choice(name="US (United States)", value="US"),
+        app_commands.Choice(name="IN (India)", value="IN"),
+        app_commands.Choice(name="UK (United Kingdom)", value="UK"),
+        app_commands.Choice(name="CA (Canada)", value="CA"),
+        app_commands.Choice(name="AU (Australia)", value="AU"),
+        app_commands.Choice(name="DE (Germany)", value="DE"),
+        app_commands.Choice(name="FR (France)", value="FR"),
+        app_commands.Choice(name="BR (Brazil)", value="BR"),
+        app_commands.Choice(name="JP (Japan)", value="JP"),
+        app_commands.Choice(name="Other", value="Other"),
+    ]
+)
 async def claim_slash(
     interaction: discord.Interaction,
     link: str,
-    platform: app_commands.Choice[str]
+    gc: app_commands.Choice[str],
+    geo: str = "US"
 ):
     try:
         if not interaction.response.is_done():
@@ -537,50 +654,36 @@ async def claim_slash(
     except Exception:
         pass
     
-    platform_str = platform.value if isinstance(platform, app_commands.Choice) else (platform or "Instagram")
+    platform_str = gc.value if isinstance(gc, app_commands.Choice) else (gc or "Instagram")
+    geo_str = geo.value if isinstance(geo, app_commands.Choice) else (geo or "US")
     clean_url = normalize_link(link)
     if not clean_url:
         await safe_respond(interaction, content=" **Invalid Link/Handle!** Please provide a valid URL or handle.", ephemeral=True)
         return
 
     referrer_name = f"{interaction.user.name} ({interaction.user.display_name})"
+    referrer_mention = interaction.user.mention
     channel_link = f"https://discord.com/channels/{interaction.guild_id}/{interaction.channel_id}"
 
     try:
         existing = await sheets_manager.check_influencer(clean_url, platform=platform_str)
         if existing:
-            embed = discord.Embed(
-                title="Influencer Already Claimed!",
-                description=f"The **[{existing.get('platform', platform_str)}]** link/handle `{clean_url}` has already been registered in the database.",
-                color=discord.Color.gold()
-            )
-            embed.add_field(name="Platform", value=existing.get("platform", platform_str), inline=True)
-            embed.add_field(name="Link / Handle", value=clean_url, inline=False)
-            embed.add_field(name="Claimed By", value=existing.get("claimed_by", "Unknown"), inline=True)
-            embed.add_field(name="Date Claimed", value=existing.get("claimed_at", "Unknown"), inline=True)
-            if existing.get("channel_link"):
-                embed.add_field(name="Channel Link", value=existing.get("channel_link"), inline=False)
-            
-            await safe_respond(interaction, embed=embed)
+            claimed_plat = existing.get("platform") or platform_str
+            claimed_by = existing.get("claimed_by", "Unknown")
+            claimed_at = existing.get("claimed_at", "Unknown")
+            ch_link = existing.get("channel_link")
+            c_geo = existing.get("geo")
+            v2_view = AlreadyClaimedView(claimed_plat, clean_url, claimed_by, claimed_at, ch_link, geo=c_geo)
+            await safe_respond(interaction, view=v2_view)
             return
 
-        res = await sheets_manager.register_influencer(clean_url, referrer_name, channel_link, platform=platform_str)
-        
-        embed = discord.Embed(
-            title="Influencer Successfully Claimed!",
-            description=f"Successfully registered **[{platform_str}]** `{clean_url}` under **{referrer_name}**.",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Platform", value=platform_str, inline=True)
-        embed.add_field(name="Link / Handle", value=clean_url, inline=False)
-        embed.add_field(name="Registered To", value=referrer_name, inline=True)
-        embed.add_field(name="Claim Date", value=res.get("claimed_at"), inline=True)
-        embed.set_footer(text="Google Sheets Database Updated")
-        
-        await safe_respond(interaction, embed=embed)
+        res = await sheets_manager.register_influencer(clean_url, referrer_name, channel_link, platform=platform_str, geo=geo_str)
+        claimed_at = res.get("claimed_at") or ""
+        v2_view = ClaimSuccessView(platform_str, clean_url, referrer_mention, claimed_at, geo=geo_str)
+        await safe_respond(interaction, view=v2_view)
 
         await logger_service.log_claim(
-            bot, interaction.guild_id, clean_url, referrer_name, channel_link, res.get("claimed_at"), platform=platform_str
+            bot, interaction.guild_id, clean_url, referrer_name, channel_link, claimed_at, platform=platform_str
         )
 
     except Exception as e:
@@ -591,9 +694,9 @@ async def claim_slash(
 @bot.tree.command(name="check", description="Check if an influencer has already been claimed in the database.")
 @app_commands.describe(
     link="The profile link or handle to check in the database",
-    platform="Choose platform: Telegram, WhatsApp, Instagram, or Discord"
+    gc="Choose platform: Telegram, WhatsApp, Instagram, or Discord"
 )
-@app_commands.choices(platform=[
+@app_commands.choices(gc=[
     app_commands.Choice(name="Telegram", value="Telegram"),
     app_commands.Choice(name="WhatsApp", value="WhatsApp"),
     app_commands.Choice(name="Instagram", value="Instagram"),
@@ -602,7 +705,7 @@ async def claim_slash(
 async def check_slash(
     interaction: discord.Interaction,
     link: str,
-    platform: app_commands.Choice[str] = None
+    gc: app_commands.Choice[str] = None
 ):
     try:
         if not interaction.response.is_done():
@@ -610,37 +713,25 @@ async def check_slash(
     except Exception:
         pass
     
-    platform_str = platform.value if isinstance(platform, app_commands.Choice) else (platform or "Instagram")
+    platform_str = gc.value if isinstance(gc, app_commands.Choice) else (gc or None)
     clean_url = normalize_link(link)
     if not clean_url:
         await safe_respond(interaction, content="Invalid Link/Handle!", ephemeral=True)
         return
 
     try:
-        existing = await sheets_manager.check_influencer(clean_url, platform=platform_str)
+        existing = await sheets_manager.check_influencer(clean_url, platform=platform_str or "Instagram")
         if existing:
-            embed = discord.Embed(
-                title="Influencer Already Claimed!",
-                description=f"The **[{existing.get('platform', platform_str)}]** link/handle `{clean_url}` is already claimed in the database.",
-                color=discord.Color.gold()
-            )
-            embed.add_field(name="Platform", value=existing.get("platform", platform_str), inline=True)
-            embed.add_field(name="Link / Handle", value=clean_url, inline=False)
-            embed.add_field(name="Claimed By", value=existing.get("claimed_by", "Unknown"), inline=True)
-            embed.add_field(name="Date Claimed", value=existing.get("claimed_at", "Unknown"), inline=True)
-            if existing.get("channel_link"):
-                embed.add_field(name="Channel Link", value=existing.get("channel_link"), inline=False)
-            await safe_respond(interaction, embed=embed)
+            claimed_plat = existing.get("platform") or platform_str or "Instagram"
+            claimed_by = existing.get("claimed_by", "Unknown")
+            claimed_at = existing.get("claimed_at", "Unknown")
+            ch_link = existing.get("channel_link")
+            c_geo = existing.get("geo")
+            v2_view = AlreadyClaimedView(claimed_plat, clean_url, claimed_by, claimed_at, ch_link, geo=c_geo)
+            await safe_respond(interaction, view=v2_view)
         else:
-            embed = discord.Embed(
-                title="Influencer Unclaimed!",
-                description=f"No record found for **[{platform_str}]** `{clean_url}`. Available to claim using `/claim`!",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Platform", value=platform_str, inline=True)
-            embed.add_field(name="Link / Handle", value=clean_url, inline=False)
-            embed.set_footer(text="Database Check Complete • Available to Claim")
-            await safe_respond(interaction, embed=embed)
+            v2_view = UnclaimedView(platform_str, clean_url)
+            await safe_respond(interaction, view=v2_view)
     except Exception as e:
         print(f"Error executing /check: {e}")
         await safe_respond(interaction, content=f"Error checking database: {str(e)}", ephemeral=True)
@@ -650,54 +741,62 @@ async def check_slash(
 @bot.command(name="sync")
 @commands.has_permissions(administrator=True)
 async def sync_prefix(ctx: commands.Context):
-    """Instantly syncs slash commands to the current server."""
+    """Instantly purges global duplicate commands and syncs slash commands to current server."""
+    global_cmds = list(bot.tree.get_commands())
+    try:
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+    except Exception as e:
+        print(f"Warning purging global commands: {e}")
+
+    for cmd in global_cmds:
+        bot.tree.add_command(cmd)
+
     bot.tree.copy_global_to(guild=ctx.guild)
     synced = await bot.tree.sync(guild=ctx.guild)
     cmd_list = [cmd.name for cmd in synced]
-    await ctx.send(f" **Instantly synced {len(synced)} slash command(s) to this server!**\nCommands available: `{', '.join(cmd_list)}`")
+    await ctx.send(
+        f" **Instantly purged global duplicates and synced {len(synced)} slash command(s) to this server!**\n"
+        f"Commands available: `{', '.join(cmd_list)}`\n"
+        f"*(Note: Restart your bot script and press **Ctrl+R** in Discord if your desktop app still caches old duplicates!)*"
+    )
 
 
 @bot.command(name="claim")
-async def claim_prefix(ctx: commands.Context, link: str = None, platform: str = "Instagram"):
+async def claim_prefix(ctx: commands.Context, link: str = None, gc: str = "Instagram", geo: str = "US"):
     if not link:
-        await ctx.send("Usage: `!claim <link_or_handle> [Telegram|WhatsApp|Instagram|Discord]`")
+        await ctx.send("Usage: `!claim <link_or_handle> [Telegram|WhatsApp|Instagram|Discord] [GEO]`")
         return
     clean_url = normalize_link(link)
-    platform_cap = platform.capitalize()
+    platform_cap = gc.capitalize()
     if platform_cap not in ["Telegram", "Whatsapp", "Instagram", "Discord"]:
         platform_cap = "Instagram"
     if platform_cap == "Whatsapp":
         platform_cap = "WhatsApp"
 
     referrer_name = f"{ctx.author.name} ({ctx.author.display_name})"
+    referrer_mention = ctx.author.mention
     channel_link = f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}"
 
     try:
         existing = await sheets_manager.check_influencer(clean_url, platform=platform_cap)
         if existing:
-            embed = discord.Embed(
-                title="Influencer Already Claimed!",
-                description=f"The **[{existing.get('platform', platform_cap)}]** link/handle `{clean_url}` is already registered.",
-                color=discord.Color.gold()
-            )
-            embed.add_field(name="Platform", value=existing.get("platform", platform_cap), inline=True)
-            embed.add_field(name="Claimed By", value=existing.get("claimed_by", "Unknown"), inline=True)
-            embed.add_field(name="Date Claimed", value=existing.get("claimed_at", "Unknown"), inline=True)
-            await ctx.send(embed=embed)
+            claimed_plat = existing.get("platform") or platform_cap
+            claimed_by = existing.get("claimed_by", "Unknown")
+            claimed_at = existing.get("claimed_at", "Unknown")
+            ch_link = existing.get("channel_link")
+            c_geo = existing.get("geo")
+            v2_view = AlreadyClaimedView(claimed_plat, clean_url, claimed_by, claimed_at, ch_link, geo=c_geo)
+            await ctx.send(view=v2_view)
             return
 
-        res = await sheets_manager.register_influencer(clean_url, referrer_name, channel_link, platform=platform_cap)
-        embed = discord.Embed(
-            title="Influencer Successfully Claimed!",
-            description=f"Successfully registered **[{platform_cap}]** `{clean_url}` under **{referrer_name}**.",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Platform", value=platform_cap, inline=True)
-        embed.add_field(name="Claim Date", value=res.get("claimed_at"), inline=True)
-        await ctx.send(embed=embed)
+        res = await sheets_manager.register_influencer(clean_url, referrer_name, channel_link, platform=platform_cap, geo=geo)
+        claimed_at = res.get("claimed_at") or ""
+        v2_view = ClaimSuccessView(platform_cap, clean_url, referrer_mention, claimed_at, geo=geo)
+        await ctx.send(view=v2_view)
 
         await logger_service.log_claim(
-            bot, ctx.guild.id, clean_url, referrer_name, channel_link, res.get("claimed_at"), platform=platform_cap
+            bot, ctx.guild.id, clean_url, referrer_name, channel_link, claimed_at, platform=platform_cap
         )
 
     except Exception as e:
@@ -705,30 +804,32 @@ async def claim_prefix(ctx: commands.Context, link: str = None, platform: str = 
 
 
 @bot.command(name="check")
-async def check_prefix(ctx: commands.Context, ig_link: str = None):
-    if not ig_link:
-        await ctx.send("Usage: `!check <instagram_link>`")
+async def check_prefix(ctx: commands.Context, link: str = None, gc: str = "Instagram"):
+    if not link:
+        await ctx.send("Usage: `!check <link_or_handle> [Telegram|WhatsApp|Instagram|Discord]`")
         return
-    clean_url = normalize_ig_link(ig_link)
-    if not clean_url or "instagram.com" not in clean_url:
-        await ctx.send("Invalid Instagram Link!")
+    clean_url = normalize_link(link)
+    if not clean_url:
+        await ctx.send("Invalid Link or Handle!")
         return
+    platform_cap = gc.capitalize()
+    if platform_cap not in ["Telegram", "Whatsapp", "Instagram", "Discord"]:
+        platform_cap = "Instagram"
+    if platform_cap == "Whatsapp":
+        platform_cap = "WhatsApp"
+
     try:
-        existing = await sheets_manager.check_influencer(clean_url)
+        existing = await sheets_manager.check_influencer(clean_url, platform=platform_cap)
         if existing:
-            embed = discord.Embed(
-                title="Influencer Already Claimed!",
-                description=f"The Instagram link `{clean_url}` is already claimed by **{existing.get('claimed_by')}** on `{existing.get('claimed_at')}`.",
-                color=discord.Color.gold()
-            )
-            await ctx.send(embed=embed)
+            claimed_plat = existing.get("platform") or platform_cap
+            claimed_by = existing.get("claimed_by", "Unknown")
+            claimed_at = existing.get("claimed_at", "Unknown")
+            ch_link = existing.get("channel_link")
+            v2_view = AlreadyClaimedView(claimed_plat, clean_url, claimed_by, claimed_at, ch_link)
+            await ctx.send(view=v2_view)
         else:
-            embed = discord.Embed(
-                title="Influencer Unclaimed!",
-                description=f"`{clean_url}` is **available to claim** using `!claim` or `/claim`!",
-                color=discord.Color.green()
-            )
-            await ctx.send(embed=embed)
+            v2_view = UnclaimedView(platform_cap, clean_url)
+            await ctx.send(view=v2_view)
     except Exception as e:
         await ctx.send(f"Error checking database: {str(e)}")
 
@@ -888,8 +989,7 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
         print(f" New query channel created: #{channel.name}. Instantly initializing V2 Dashboard!")
         await asyncio.sleep(0.5)
         try:
-            from pinned_dashboard import resend_channel_dashboard
-            await resend_channel_dashboard(channel)
+            await strike_tracker.initialize_channel(channel, send_dashboard=True)
         except Exception as e:
             print(f"Error initializing dashboard for new channel #{channel.name}: {e}")
 
@@ -900,8 +1000,7 @@ async def on_guild_channel_update(before: discord.abc.GuildChannel, after: disco
         print(f" Channel renamed to query channel: #{after.name}. Instantly initializing V2 Dashboard!")
         await asyncio.sleep(0.5)
         try:
-            from pinned_dashboard import resend_channel_dashboard
-            await resend_channel_dashboard(after)
+            await strike_tracker.initialize_channel(after, send_dashboard=True)
         except Exception as e:
             print(f"Error initializing dashboard for updated channel #{after.name}: {e}")
 
@@ -931,7 +1030,19 @@ async def on_ready():
     sheets_manager.set_bot(bot)
     strike_tracker.set_bot(bot)
 
-    # Initialize all existing query channels on startup
+    # 1. Clear global commands on Discord API to prevent double/duplicate slash commands in UI
+    global_cmds = list(bot.tree.get_commands())
+    try:
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+    except Exception as e:
+        print(f"Warning clearing stale global commands: {e}")
+
+    # Restore local commands back to tree
+    for cmd in global_cmds:
+        bot.tree.add_command(cmd)
+
+    # 2. Sync instant guild-specific slash commands for each connected guild
     for guild in bot.guilds:
         try:
             bot.tree.copy_global_to(guild=guild)
@@ -947,12 +1058,6 @@ async def on_ready():
                 except Exception as e:
                     print(f"Error initializing query channel #{ch.name} on startup: {e}")
 
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} global slash command(s): {[cmd.name for cmd in synced]}")
-    except Exception as e:
-        print(f"Failed to sync slash commands: {e}")
-        
     if not periodic_strike_audit.is_running():
         periodic_strike_audit.start()
         print(f"Periodic strike audit task started (runs every {AUDIT_INTERVAL_MINUTES} mins).")

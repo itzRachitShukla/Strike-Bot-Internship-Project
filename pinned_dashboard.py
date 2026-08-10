@@ -305,6 +305,28 @@ class UnclaimChannelButton(discord.ui.Button):
             await interaction.followup.send("Channel is already unclaimed.", ephemeral=True)
 
 
+class ResetDashboardButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Reset Dashboard",
+            style=discord.ButtonStyle.danger,
+            custom_id="v2_reset_dashboard_btn"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await safe_defer(interaction, ephemeral=True)
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.followup.send("Only Administrators can reset the channel dashboard.", ephemeral=True)
+            return
+
+        from strike_tracker import strike_tracker
+        res = await strike_tracker.reset_channel_dashboard(interaction.channel, admin_user=interaction.user)
+        if res:
+            await interaction.followup.send(f"Success! Dashboard for #{interaction.channel.name} has been reset.", ephemeral=True)
+        else:
+            await interaction.followup.send("Failed to reset dashboard.", ephemeral=True)
+
+
 # --- Helper for Current Active Day Calculation ---
 def get_current_day_num(channel_id: str, channel: discord.TextChannel = None) -> int:
     from strike_tracker import strike_tracker
@@ -368,13 +390,12 @@ def build_dashboard_v2_layout(
 
     if last_video_dt:
         last_video_str = f"<t:{int(last_video_dt.timestamp())}:F> (<t:{int(last_video_dt.timestamp())}:R>)"
-        if last_video_dt >= window_start:
-            video_status = f"Submitted for active window! Next video due before 1:00 AM IST ({deadline_str})"
-        else:
-            video_status = f"Pending video submission! Due before 1:00 AM IST ({deadline_str})"
+        submitted_emoji = "✅" if last_video_dt >= window_start else "❌"
     else:
         last_video_str = "No video submitted yet"
-        video_status = f"Pending initial video submission! Due before 1:00 AM IST ({deadline_str})"
+        submitted_emoji = "❌"
+
+    deadline_status_str = f"- Submitted: {submitted_emoji}\n- Next Window: {deadline_str}"
 
     # 3. 7-Day DM Performance in Column Format (Highlighting Current Active Day)
     if day_values:
@@ -390,7 +411,7 @@ def build_dashboard_v2_layout(
     # 4. Strike History Text with Native Hyphen Bullets (No Extra Whitespace)
     if strike_dates and active_strikes > 0:
         history_text = "\n".join([f"- Strike {i}: Received `{s_date}`" for i, s_date in enumerate(strike_dates[:active_strikes], start=1)])
-        history_text += "\n*Rule: Active strikes automatically revoke after 7 consecutive days clean.*"
+        history_text += "\n*Rule: Strikes 1 & 2 automatically revoke after 7 consecutive clean days. 3/3 strikes will NOT auto-clear and require admin action.*"
     else:
         history_text = "No active strikes on record."
 
@@ -415,7 +436,7 @@ def build_dashboard_v2_layout(
     # Screen Recording & 24h Deadline Info
     container.add_item(discord.ui.TextDisplay(
         f"- **__Last Screen Recording:__**\n{last_video_str}\n"
-        f"- **__24h Deadline Status:__**\n{video_status}"
+        f"- **__24h Deadline Status:__**\n{deadline_status_str}"
     ))
     container.add_item(discord.ui.Separator())
     
@@ -450,6 +471,10 @@ def build_dashboard_v2_layout(
     assign_worker_row.add_item(AssignWorkerSelect())
     container.add_item(assign_worker_row)
     
+    reset_dashboard_row = discord.ui.ActionRow()
+    reset_dashboard_row.add_item(ResetDashboardButton())
+    container.add_item(reset_dashboard_row)
+
     layout_view.add_item(container)
 
     return layout_view
@@ -498,7 +523,7 @@ async def update_pinned_dashboard(
                 pinned_messages = []
 
             dashboard_custom_ids = {
-                "v2_claim_channel_btn", "v2_unclaim_channel_btn", "v2_undo_strike_btn", "v2_view_stats_btn", "v2_dashboard_select_menu"
+                "v2_claim_channel_btn", "v2_unclaim_channel_btn", "v2_undo_strike_btn", "v2_view_stats_btn", "v2_dashboard_select_menu", "v2_reset_dashboard_btn"
             }
 
             def is_bot_dashboard_message(msg):
@@ -564,7 +589,7 @@ async def resend_channel_dashboard(channel: discord.TextChannel):
     channel_id = str(channel.id)
     from strike_tracker import strike_tracker
     if channel_id not in strike_tracker.channel_states:
-        await strike_tracker.initialize_channel(channel)
+        await strike_tracker.initialize_channel(channel, send_dashboard=False)
 
     state = strike_tracker.channel_states[channel_id]
     cached_msg_id = state.get("dashboard_msg_id")

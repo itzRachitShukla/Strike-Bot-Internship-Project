@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from datetime import datetime, timedelta
 import discord
 
-from strike_tracker import strike_tracker, is_query_channel, is_video_message
+from strike_tracker import strike_tracker, is_query_channel, is_video_message, format_datetime_custom
 from pinned_dashboard import build_dashboard_v2_layout, DashboardLayoutView, update_pinned_dashboard
 from logger_service import logger_service
 from main import parse_time_string_to_hours
@@ -154,7 +154,7 @@ class TestBotLogic(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["active_strikes"], 1)
         
         # Fast forward 8 days without new strikes
-        state["strike_dates"][-1] = (datetime.utcnow() - timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S IST")
+        state["strike_dates"][-1] = format_datetime_custom(datetime.utcnow() - timedelta(days=8))
         state["last_video_dt"] = datetime.utcnow()
         
         # Run audit (should revoke strike #1)

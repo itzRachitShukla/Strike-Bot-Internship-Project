@@ -151,6 +151,32 @@ class LoggerService:
         ]
         await self._send_v2_log(bot, guild_id, "strike", items, accent_color=accent)
 
+        # Also write event to Google Sheets "Strike Audit Log" worksheet tab
+        try:
+            from sheets_manager import sheets_manager
+            admin_str = f"{admin_user.name} ({admin_user.id})" if admin_user else "System"
+            ch_id = ""
+            if "channels/" in channel_link:
+                parts = channel_link.split("channels/")[-1].split("/")
+                if len(parts) >= 2:
+                    ch_id = parts[1]
+                    
+            asyncio.create_task(
+                sheets_manager.log_strike_event(
+                    event_type=event_type,
+                    worker_name=worker_tag.replace("<@", "").replace(">", ""),
+                    worker_user_id="",
+                    channel_id=ch_id,
+                    channel_link=channel_link,
+                    active_strikes=active_strikes,
+                    action_by_admin=admin_str,
+                    reason=reason or "",
+                    details=details
+                )
+            )
+        except Exception as se:
+            print(f"Warning logging strike event to Google Sheets: {se}")
+
     # --- 2b. 3-Strike Alert Log ---
     async def log_three_strike_alert(
         self,

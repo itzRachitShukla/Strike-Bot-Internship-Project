@@ -15,9 +15,10 @@ def clear_google_sheets_database():
     sh = gc.open_by_key(SPREADSHEET_ID)
 
     sheets_to_clear = [
-        ("Influencers", ["Instagram Link", "Claimed By", "Claimed At", "Channel Link"]),
-        ("Staff Strikes", ["Worker Username", "Worker User ID", "Channel ID", "Channel Link", "Active Strikes", "Strike 1 Date", "Strike 2 Date", "Strike 3 Date", "Last Video Date"]),
-        ("Daily DM Logs", ["Worker Username", "Channel ID", "Channel Link", "Day 1 DMs", "Day 2 DMs", "Day 3 DMs", "Day 4 DMs", "Day 5 DMs", "Day 6 DMs", "Day 7 DMs", "Total DMs"])
+        ("Influencers", ["Social Link", "Referred By", "Channel Link", "Timestamp", "GEO", "Platform"]),
+        ("Staff Strikes", ["Worker Username", "Worker User ID", "Channel ID", "Channel Link", "Active Strikes", "Strike 1 Date", "Strike 1 Reason", "Strike 2 Date", "Strike 2 Reason", "Strike 3 Date", "Strike 3 Reason", "Last Video Date", "Last Action By Admin"]),
+        ("Daily DM Logs", ["Worker Username", "Channel ID", "Channel Link", "Day 1 DMs", "Day 2 DMs", "Day 3 DMs", "Day 4 DMs", "Day 5 DMs", "Day 6 DMs", "Day 7 DMs", "Total DMs"]),
+        ("Strike Audit Log", ["Timestamp", "Event Type", "Worker Username", "Worker User ID", "Channel ID", "Channel Link", "Active Strikes", "Action By Admin", "Reason", "Details"])
     ]
 
     for title, headers in sheets_to_clear:
