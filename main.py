@@ -10,7 +10,7 @@ from config import DISCORD_TOKEN, GOOGLE_SERVICE_ACCOUNT_FILE, SPREADSHEET_ID, S
 from sheets_manager import sheets_manager, normalize_link, normalize_ig_link
 from strike_tracker import strike_tracker, is_query_channel, is_video_message
 from pinned_dashboard import update_pinned_dashboard, DashboardLayoutView
-from logger_service import logger_service
+from logger_service import logger_service, send_rich_permission_error_v2
 
 # Discord Bot Setup
 intents = discord.Intents.default()
@@ -1097,13 +1097,11 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
     await logger_service.log_error(bot, interaction.guild_id, type(error).__name__, tb_str, context_info=ctx_str)
 
-    err_msg = f" An error occurred while executing `/{cmd_name}`: `{str(error)}`"
-    if isinstance(error, app_commands.errors.MissingPermissions):
-        err_msg = " Unauthorized: You do not have permission to execute this slash command."
-    elif isinstance(error, app_commands.errors.BotMissingPermissions):
-        err_msg = " Permission Error: The bot lacks required permissions in this channel."
-
-    await safe_respond(interaction, content=err_msg, ephemeral=True)
+    if isinstance(error, (app_commands.errors.MissingPermissions, app_commands.errors.BotMissingPermissions, discord.Forbidden)):
+        await send_rich_permission_error_v2(interaction, interaction.user, f"/{cmd_name}")
+    else:
+        err_msg = f"An error occurred while executing `/{cmd_name}`: `{str(error)}`"
+        await safe_respond(interaction, content=err_msg, ephemeral=True)
 
 
 @bot.event
@@ -1122,12 +1120,10 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 
     await logger_service.log_error(bot, guild_id, type(error).__name__, tb_str, context_info=ctx_str)
 
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send(" Unauthorized: You do not have permission to execute this command.")
-    elif isinstance(error, commands.BotMissingPermissions):
-        await ctx.send(" Permission Error: The bot lacks required permissions in this channel.")
+    if isinstance(error, (commands.MissingPermissions, commands.BotMissingPermissions, discord.Forbidden)):
+        await send_rich_permission_error_v2(ctx, ctx.author, f"!{cmd_name}")
     else:
-        await ctx.send(f" An error occurred: `{str(error)}`")
+        await ctx.send(f"An error occurred: `{str(error)}`")
 
 
 @bot.event

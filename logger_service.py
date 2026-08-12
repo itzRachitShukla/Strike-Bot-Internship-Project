@@ -81,6 +81,34 @@ class LoggerService:
             layout_view.add_item(container)
 
             await channel.send(view=layout_view)
+        except discord.Forbidden as fe:
+            print(f"Bot missing permission to send log in #{channel.name}: {fe}")
+            if category != "error":
+                asyncio.create_task(
+                    self.log_error(
+                        bot, guild_id, "Missing Log Channel Permission",
+                        f"Bot lacks Send Messages permission in log channel #{channel.name} ({channel_id}).",
+                        context_info=f"Log Channel: <#{channel_id}>"
+                    )
+                )
+            elif guild_id and bot:
+                guild = bot.get_guild(guild_id)
+                if guild and guild.owner:
+                    try:
+                        dm_layout = discord.ui.LayoutView()
+                        dm_container = discord.ui.Container(accent_color=discord.Color.red())
+                        dm_container.add_item(discord.ui.TextDisplay("## Bot Permission Error Alert"))
+                        dm_container.add_item(discord.ui.Separator())
+                        dm_container.add_item(discord.ui.TextDisplay(
+                            f"- **Server:** `{guild.name}`\n"
+                            f"- **Target Channel:** <#{channel_id}>\n"
+                            f"- **Issue:** The bot lacks permission to post audit log messages in this channel.\n\n"
+                            "**Solution:** Please grant the bot Send Messages and Embed Links permissions."
+                        ))
+                        dm_layout.add_item(dm_container)
+                        asyncio.create_task(guild.owner.send(view=dm_layout))
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"Error sending {category} V2 log: {e}")
 
@@ -327,7 +355,7 @@ class LoggerService:
         truncated_details = error_details[:1800] if error_details else "No details provided"
 
         items = [
-            discord.ui.TextDisplay(f"## ⚠️ Audit Log: Bot Exception / Permission Warning"),
+            discord.ui.TextDisplay("## Audit Log: Bot Exception / Permission Warning"),
             discord.ui.Separator(),
             discord.ui.TextDisplay(
                 f"- **__Error Type:__** `{error_title}`\n"
@@ -340,3 +368,64 @@ class LoggerService:
         await self._send_v2_log(bot, guild_id, "error", items, accent_color=discord.Color.red())
 
 logger_service = LoggerService()
+
+
+async def send_rich_permission_error_v2(
+    target: discord.Interaction | discord.TextChannel | object,
+    user: discord.User | discord.Member,
+    action_name: str,
+    channel: discord.TextChannel | None = None
+):
+    """
+    Sends a rich Discord Components V2 error layout indicating missing bot permissions.
+    Tries interaction/channel response first, falling back to a direct DM to the user if channel send is forbidden.
+    """
+    ch_obj = channel or (getattr(target, "channel", None) if not isinstance(target, discord.TextChannel) else target)
+    ch_link = f"https://discord.com/channels/{ch_obj.guild.id}/{ch_obj.id}" if ch_obj and hasattr(ch_obj, "guild") and ch_obj.guild else "this channel"
+
+    layout_view = discord.ui.LayoutView()
+    container = discord.ui.Container(accent_color=discord.Color.red())
+
+    container.add_item(discord.ui.TextDisplay("## Bot Permission Error"))
+    container.add_item(discord.ui.Separator())
+    container.add_item(discord.ui.TextDisplay(
+        f"- **Action Attempted:** `{action_name}`\n"
+        f"- **Target Channel:** {ch_link}\n"
+        f"- **Issue:** The bot lacks required channel permissions to complete this request."
+    ))
+    container.add_item(discord.ui.Separator())
+    container.add_item(discord.ui.TextDisplay(
+        "**Required Permissions:**\n"
+        "- View Channel\n"
+        "- Send Messages\n"
+        "- Embed Links\n"
+        "- Manage Messages and Pin Messages\n\n"
+        "**Solution:** An Administrator must grant these permissions to the bot role in channel settings."
+    ))
+    layout_view.add_item(container)
+
+    # 1. Try interaction response if available
+    if isinstance(target, discord.Interaction):
+        try:
+            if not target.response.is_done():
+                await target.response.send_message(view=layout_view, ephemeral=True)
+                return
+            else:
+                await target.followup.send(view=layout_view, ephemeral=True)
+                return
+        except Exception:
+            pass
+
+    # 2. Try sending directly to channel
+    if hasattr(target, "send"):
+        try:
+            await target.send(view=layout_view)
+            return
+        except Exception:
+            pass
+
+    # 3. Fallback: DM the user directly
+    try:
+        await user.send(view=layout_view)
+    except Exception as dme:
+        print(f"Failed to DM user {user.name} for permission error: {dme}")
