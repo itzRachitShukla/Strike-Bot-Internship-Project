@@ -176,11 +176,51 @@ class ClaimChannelButton(discord.ui.Button):
             await interaction.followup.send("Failed to claim channel.", ephemeral=True)
 
 
+class GiveStrikeButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Give Strike",
+            style=discord.ButtonStyle.danger,
+            custom_id="v2_give_strike_btn"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await safe_defer(interaction, ephemeral=True)
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.followup.send("Only Administrators can give strikes.", ephemeral=True)
+            return
+
+        from strike_tracker import strike_tracker
+        channel_id = str(interaction.channel_id)
+        state = strike_tracker.channel_states.get(channel_id, {})
+        worker_user_id = state.get("worker_user_id")
+
+        if not worker_user_id:
+            await interaction.followup.send("Cannot give strike: This channel is currently unclaimed.", ephemeral=True)
+            return
+
+        if state.get("active_strikes", 0) >= 3:
+            await interaction.followup.send("Worker already has the maximum of 3 strikes.", ephemeral=True)
+            return
+
+        added = await strike_tracker.add_strikes(
+            interaction.channel,
+            amount=1,
+            reason="Admin manual strike (24h window)",
+            admin_user=interaction.user
+        )
+
+        if added > 0:
+            await interaction.followup.send(f"Success! Issued 1 strike to worker <@{worker_user_id}>.", ephemeral=True)
+        else:
+            await interaction.followup.send("Failed to issue strike.", ephemeral=True)
+
+
 class UndoStrikeButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
             label="Undo Last Strike",
-            style=discord.ButtonStyle.danger,
+            style=discord.ButtonStyle.secondary,
             custom_id="v2_undo_strike_btn"
         )
 
@@ -440,11 +480,15 @@ def build_dashboard_v2_layout(
     ))
     container.add_item(discord.ui.Separator())
     
-    # Active Strikes Section + Undo Last Strike Button on the Right Side
+    # Active Strikes Section + Admin Give Strike Button on the Right Side
     container.add_item(discord.ui.Section(
         discord.ui.TextDisplay(f"- **__Active Strikes:__**\n{active_strikes}/3"),
-        accessory=UndoStrikeButton()
+        accessory=GiveStrikeButton()
     ))
+    
+    undo_row = discord.ui.ActionRow()
+    undo_row.add_item(UndoStrikeButton())
+    container.add_item(undo_row)
     container.add_item(discord.ui.Separator())
 
     # Strike History Field Section (Clean Single Newline, No Extra Whitespace)

@@ -14,7 +14,8 @@ class LoggerService:
             "strike_3": None,         # Channel ID for 3-strike alert logs
             "worker_add": None,       # Channel ID for worker claim channel logs
             "worker_remove": None,    # Channel ID for worker unclaim logs
-            "worksheet": None         # Channel ID for Google Sheets change logs
+            "worksheet": None,        # Channel ID for Google Sheets change logs
+            "error": None             # Channel ID for bot error logs
         }
         self.ping_targets = []        # List of role or user IDs/mentions to ping for 3-strike alerts
         self.load_config()
@@ -308,5 +309,34 @@ class LoggerService:
             )
         ]
         await self._send_v2_log(bot, guild_id, "worksheet", items, accent_color=discord.Color.green())
+
+    # --- 7. Bot Error Log ---
+    async def log_error(
+        self,
+        bot: discord.Client | None,
+        guild_id: int | None,
+        error_title: str,
+        error_details: str,
+        context_info: str | None = None
+    ):
+        """Logs exceptions, permission errors, and system warnings to the #bot-error-logs channel."""
+        import time
+        now_unix = int(time.time())
+        timestamp_str = f"<t:{now_unix}:F> (<t:{now_unix}:R>)"
+
+        truncated_details = error_details[:1800] if error_details else "No details provided"
+
+        items = [
+            discord.ui.TextDisplay(f"## ⚠️ Audit Log: Bot Exception / Permission Warning"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(
+                f"- **__Error Type:__** `{error_title}`\n"
+                f"- **__Context Info:__** {context_info or 'Global System/Command Event'}\n"
+                f"- **__Timestamp:__** {timestamp_str}"
+            ),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(f"```python\n{truncated_details}\n```")
+        ]
+        await self._send_v2_log(bot, guild_id, "error", items, accent_color=discord.Color.red())
 
 logger_service = LoggerService()

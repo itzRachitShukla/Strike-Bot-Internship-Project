@@ -170,7 +170,7 @@ class SheetsManager:
     def _get_all_staff_records_sync(self):
         headers = [
             "Worker Username", "Worker User ID", "Channel ID", "Channel Link",
-            "Active Strikes", "Strike 1 Date", "Strike 1 Reason", "Strike 2 Date",
+            "Status", "Active Strikes", "Strike 1 Date", "Strike 1 Reason", "Strike 2 Date",
             "Strike 2 Reason", "Strike 3 Date", "Strike 3 Reason", "Last Video Date", "Last Action By Admin"
         ]
         ws = self._get_worksheet("Staff Strikes", headers)
@@ -193,11 +193,12 @@ class SheetsManager:
         s1_reason: str = "",
         s2_reason: str = "",
         s3_reason: str = "",
-        last_admin: str = ""
+        last_admin: str = "",
+        status: str = None
     ):
         headers = [
             "Worker Username", "Worker User ID", "Channel ID", "Channel Link",
-            "Active Strikes", "Strike 1 Date", "Strike 1 Reason", "Strike 2 Date",
+            "Status", "Active Strikes", "Strike 1 Date", "Strike 1 Reason", "Strike 2 Date",
             "Strike 2 Reason", "Strike 3 Date", "Strike 3 Reason", "Last Video Date", "Last Action By Admin"
         ]
         ws = self._get_worksheet("Staff Strikes", headers)
@@ -209,11 +210,14 @@ class SheetsManager:
                 row_index = i
                 break
         
+        worker_status = status or ("Active" if (worker_user_id and str(worker_user_id).isdigit()) else "Inactive")
+
         row_data = [
             worker_name,
             str(worker_user_id or ""),
             str(channel_id),
             channel_link,
+            worker_status,
             active_strikes,
             s1_date or "",
             s1_reason or "",
@@ -226,7 +230,7 @@ class SheetsManager:
         ]
         
         if row_index:
-            range_name = f"A{row_index}:M{row_index}"
+            range_name = f"A{row_index}:N{row_index}"
             ws.update(range_name, [row_data], value_input_option="USER_ENTERED")
         else:
             ws.append_row(row_data, value_input_option="USER_ENTERED")
@@ -235,7 +239,7 @@ class SheetsManager:
             from logger_service import logger_service
             asyncio.run_coroutine_threadsafe(
                 logger_service.log_worksheet_change(
-                    self.bot, None, "Staff Strikes", f"Updated record for {worker_name}", f"Active Strikes: {active_strikes}", channel_id=channel_id, channel_link=channel_link
+                    self.bot, None, "Staff Strikes", f"Updated record for {worker_name}", f"Status: {worker_status}, Active Strikes: {active_strikes}", channel_id=channel_id, channel_link=channel_link
                 ),
                 self.bot.loop
             )
@@ -254,12 +258,13 @@ class SheetsManager:
         s1_reason: str = "",
         s2_reason: str = "",
         s3_reason: str = "",
-        last_admin: str = ""
+        last_admin: str = "",
+        status: str = None
     ):
         return await asyncio.to_thread(
             self._execute_with_retry,
             self._update_staff_record_sync,
-            channel_id, worker_name, worker_user_id, channel_link, active_strikes, s1_date, s2_date, s3_date, last_video_date, s1_reason, s2_reason, s3_reason, last_admin
+            channel_id, worker_name, worker_user_id, channel_link, active_strikes, s1_date, s2_date, s3_date, last_video_date, s1_reason, s2_reason, s3_reason, last_admin, status
         )
 
     # --- Strike Audit Log Logic ---

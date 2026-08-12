@@ -205,7 +205,8 @@ class StrikeTracker:
             active_strikes=state["active_strikes"],
             s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
             last_video_date=format_datetime_custom(state["last_video_dt"]),
-            s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r
+            s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r,
+            status="Active"
         )
 
         await update_pinned_dashboard(
@@ -252,7 +253,8 @@ class StrikeTracker:
             s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
             last_video_date=format_datetime_custom(state["last_video_dt"]),
             s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r,
-            last_admin=admin_info
+            last_admin=admin_info,
+            status="Inactive"
         )
 
         await update_pinned_dashboard(
@@ -295,7 +297,8 @@ class StrikeTracker:
             s1_date="", s2_date="", s3_date="",
             last_video_date="",
             s1_reason="", s2_reason="", s3_reason="",
-            last_admin=admin_info
+            last_admin=admin_info,
+            status="Inactive"
         )
 
         await update_pinned_dashboard(
@@ -504,71 +507,10 @@ class StrikeTracker:
         window_start, window_end = get_current_window_bounds(now)
         channel_link = f"https://discord.com/channels/{channel.guild.id}/{channel.id}"
 
-        # Check 1 AM - 1 AM IST window deadline breach for claimed channel
-        if state.get("worker_user_id"):
-            has_video_in_window = (last_vid is not None and last_vid >= window_start)
-            if not has_video_in_window and state["active_strikes"] < 3:
-                state["active_strikes"] += 1
-                now_str = format_datetime_custom(now)
-                reason_str = "Missing daily screen recording submission before 1:00 AM IST"
-                state["strike_dates"].append(now_str)
-                state["strike_reasons"].append(reason_str)
-                state["last_video_dt"] = now
-
-                s_dates = state["strike_dates"]
-                s_reasons = state["strike_reasons"]
-                s1_d = s_dates[0] if len(s_dates) > 0 else ""
-                s2_d = s_dates[1] if len(s_dates) > 1 else ""
-                s3_d = s_dates[2] if len(s_dates) > 2 else ""
-
-                s1_r = s_reasons[0] if len(s_reasons) > 0 else ""
-                s2_r = s_reasons[1] if len(s_reasons) > 1 else ""
-                s3_r = s_reasons[2] if len(s_reasons) > 2 else ""
-
-                await sheets_manager.update_staff_record(
-                    channel_id=channel_id,
-                    worker_name=state["worker_name"],
-                    worker_user_id=state.get("worker_user_id") or "",
-                    channel_link=channel_link,
-                    active_strikes=state["active_strikes"],
-                    s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
-                    last_video_date=format_datetime_custom(now),
-                    s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r,
-                    last_admin="System (Deadline)"
-                )
-
-                details_str = "1:00 AM IST screen recording deadline breached"
-
-                await update_pinned_dashboard(
-                    channel, state["worker_name"], state.get("worker_user_id"), state["active_strikes"], state["strike_dates"], now
-                )
-
-                worker_tag = self._get_worker_tag(channel, state)
-                
-                if state["active_strikes"] == 2:
-                    warning_msg = f"\n**WARNING!** {worker_tag} You have received **2 strikes**! You are **1 strike away** from receiving your 3rd strike and being banned."
-                elif state["active_strikes"] >= 3:
-                    warning_msg = f"\n**CRITICAL ALERT!** {worker_tag} has reached **3/3 STRIKES**! Immediate administrative action required."
-                else:
-                    warning_msg = ""
-
-                try:
-                    await channel.send(
-                        f"**STRIKE ISSUED!** {worker_tag} has received **Strike #{state['active_strikes']}** "
-                        f"for missing the 1:00 AM IST screen recording deadline.{warning_msg}"
-                    )
-                except Exception as e:
-                    print(f"Error sending strike alert in {channel.name}: {e}")
-
-                if self.bot:
-                    from logger_service import logger_service
-                    await logger_service.log_strike(
-                        bot, channel.guild.id, worker_tag, channel_link, "ISSUED", state["active_strikes"], details_str, reason=reason_str
-                    )
-                    if state["active_strikes"] >= 3:
-                        await logger_service.log_three_strike_alert(
-                            bot, channel.guild.id, worker_tag, channel_link, state["active_strikes"], details_str, reason=reason_str
-                        )
+        # Refresh channel pinned dashboard to update 24h deadline status and window timers
+        await update_pinned_dashboard(
+            channel, state["worker_name"], state.get("worker_user_id"), state["active_strikes"], state["strike_dates"], state["last_video_dt"]
+        )
 
         # Check 7-Day Clean Streak Auto-Revocation (Applies to 1 or 2 strikes only; 3 strikes require admin action)
         if 0 < state["active_strikes"] < 3 and state["strike_dates"]:
@@ -626,15 +568,66 @@ class StrikeTracker:
             except Exception as e:
                 print(f"Error checking clean streak in {channel.name}: {e}")
 
+    async def mark_channel_inactive(self, channel_id: str, channel_name: str = ""):
+        """Marks a worker as Inactive in Google Sheets when their channel is deleted or unclaimed."""
+        channel_id = str(channel_id)
+        state = self.channel_states.get(channel_id, {})
+        worker_name = state.get("worker_name", channel_name or "Unknown Channel")
+        worker_user_id = state.get("worker_user_id", "") or ""
+        active_strikes = state.get("active_strikes", 0)
+        s_dates = state.get("strike_dates", [])
+        s_reasons = state.get("strike_reasons", [])
+        last_vid = state.get("last_video_dt")
+
+        s1_d = s_dates[0] if len(s_dates) > 0 else ""
+        s2_d = s_dates[1] if len(s_dates) > 1 else ""
+        s3_d = s_dates[2] if len(s_dates) > 2 else ""
+
+        s1_r = s_reasons[0] if len(s_reasons) > 0 else ""
+        s2_r = s_reasons[1] if len(s_reasons) > 1 else ""
+        s3_r = s_reasons[2] if len(s_reasons) > 2 else ""
+
+        channel_link = f"Deleted Channel ({channel_id})"
+
+        await sheets_manager.update_staff_record(
+            channel_id=channel_id,
+            worker_name=worker_name,
+            worker_user_id=worker_user_id,
+            channel_link=channel_link,
+            active_strikes=active_strikes,
+            s1_date=s1_d, s2_date=s2_d, s3_date=s3_d,
+            last_video_date=format_datetime_custom(last_vid),
+            s1_reason=s1_r, s2_reason=s2_r, s3_reason=s3_r,
+            last_admin="System (Channel Deleted)",
+            status="Inactive"
+        )
+        if channel_id in self.channel_states:
+            self.channel_states[channel_id]["worker_user_id"] = None
+
     async def audit_all_query_channels(self, bot: discord.Client):
         self.bot = bot
+        existing_channel_ids = set()
         for guild in bot.guilds:
             for ch in guild.text_channels:
                 if is_query_channel(ch):
+                    existing_channel_ids.add(str(ch.id))
                     try:
                         await self.audit_channel(ch, bot)
                     except Exception as e:
                         print(f"Error auditing channel {ch.name}: {e}")
+
+        # Check records in sheets for deleted channels (offline deletion cleanup)
+        try:
+            records = await sheets_manager.get_all_staff_records()
+            for r in records:
+                ch_id = str(r.get("Channel ID", ""))
+                st_val = str(r.get("Status", ""))
+                if ch_id and st_val == "Active" and ch_id not in existing_channel_ids:
+                    w_name = str(r.get("Worker Username", ""))
+                    print(f"Offline channel deletion detected for channel ID {ch_id} ({w_name}). Marking status as Inactive...")
+                    await self.mark_channel_inactive(ch_id, w_name)
+        except Exception as e:
+            print(f"Error checking offline deleted channels: {e}")
 
     async def simulate_time_travel(self, channel, hours: float):
         channel_id = str(channel.id)

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import traceback
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -75,7 +76,8 @@ def build_setup_logs_embed(active_category: str = "claim") -> discord.Embed:
         "strike_3": "3. 3-Strike Alert Logs",
         "worker_add": "4. Worker Add Logs",
         "worker_remove": "5. Worker Remove Logs",
-        "worksheet": "6. Worksheet Changes Logs"
+        "worksheet": "6. Worksheet Changes Logs",
+        "error": "7. Bot Error Logs"
     }
     embed = discord.Embed(
         title="Audit Log Channels Configuration",
@@ -92,9 +94,10 @@ def build_setup_logs_embed(active_category: str = "claim") -> discord.Embed:
     embed.add_field(name="4. Worker Add Logs", value=f"<#{logger_service.log_channels.get('worker_add')}>" if logger_service.log_channels.get('worker_add') else "*Not Configured*", inline=False)
     embed.add_field(name="5. Worker Remove Logs", value=f"<#{logger_service.log_channels.get('worker_remove')}>" if logger_service.log_channels.get('worker_remove') else "*Not Configured*", inline=False)
     embed.add_field(name="6. Worksheet Changes Logs", value=f"<#{logger_service.log_channels.get('worksheet')}>" if logger_service.log_channels.get('worksheet') else "*Not Configured*", inline=False)
+    embed.add_field(name="7. Bot Error Logs", value=f"<#{logger_service.log_channels.get('error')}>" if logger_service.log_channels.get('error') else "*Not Configured*", inline=False)
     
     ping_display = ", ".join(logger_service.ping_targets) if logger_service.ping_targets else "*None Configured*"
-    embed.add_field(name="7. Configured 3-Strike Alert Pings", value=ping_display, inline=False)
+    embed.add_field(name="8. Configured 3-Strike Alert Pings", value=ping_display, inline=False)
     
     embed.set_footer(text="Admin Log Setup • Changes persist automatically across restarts")
     return embed
@@ -110,6 +113,7 @@ class CategorySelect(discord.ui.Select):
             discord.SelectOption(label="4. Worker Add Logs", value="worker_add", default=(selected_category == "worker_add")),
             discord.SelectOption(label="5. Worker Remove Logs", value="worker_remove", default=(selected_category == "worker_remove")),
             discord.SelectOption(label="6. Worksheet Changes Logs", value="worksheet", default=(selected_category == "worksheet")),
+            discord.SelectOption(label="7. Bot Error Logs", value="error", default=(selected_category == "error")),
         ]
         super().__init__(
             placeholder="Select a log category to configure manually...",
@@ -244,6 +248,10 @@ class AutoSetupLogsButton(discord.ui.Button):
             "worksheet": {
                 "default_name": "worksheet-changes-logs",
                 "keywords": ["worksheet-change", "worksheet-log", "sheet-change"]
+            },
+            "error": {
+                "default_name": "bot-error-logs",
+                "keywords": ["bot-error", "error-log", "bot-errors", "exception-log"]
             }
         }
 
@@ -1005,6 +1013,16 @@ async def on_guild_channel_update(before: discord.abc.GuildChannel, after: disco
             print(f"Error initializing dashboard for updated channel #{after.name}: {e}")
 
 @bot.event
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
+    """Fired instantly when a channel is deleted in the server."""
+    if isinstance(channel, discord.TextChannel) and is_query_channel(channel):
+        print(f"Query channel deleted: #{channel.name} ({channel.id}). Marking status as Inactive...")
+        try:
+            await strike_tracker.mark_channel_inactive(str(channel.id), channel.name)
+        except Exception as e:
+            print(f"Error marking deleted channel #{channel.name} as inactive: {e}")
+
+@bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
@@ -1061,6 +1079,68 @@ async def on_ready():
     if not periodic_strike_audit.is_running():
         periodic_strike_audit.start()
         print(f"Periodic strike audit task started (runs every {AUDIT_INTERVAL_MINUTES} mins).")
+
+
+# ----------------------------------------------------
+# GLOBAL BOT ERROR HANDLERS (LOGS TO #bot-error-logs)
+# ----------------------------------------------------
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    cmd_name = interaction.command.name if interaction.command else "Unknown Slash Command"
+    print(f"Slash command error in /{cmd_name}: {error}")
+    
+    ch_id = interaction.channel_id
+    ctx_str = f"Slash Command: `/{cmd_name}` in <#{ch_id}>" if ch_id else f"Slash Command: `/{cmd_name}`"
+    if interaction.user:
+        ctx_str += f" by {interaction.user.mention}"
+
+    await logger_service.log_error(bot, interaction.guild_id, type(error).__name__, tb_str, context_info=ctx_str)
+
+    err_msg = f" An error occurred while executing `/{cmd_name}`: `{str(error)}`"
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        err_msg = " Unauthorized: You do not have permission to execute this slash command."
+    elif isinstance(error, app_commands.errors.BotMissingPermissions):
+        err_msg = " Permission Error: The bot lacks required permissions in this channel."
+
+    await safe_respond(interaction, content=err_msg, ephemeral=True)
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, commands.CommandNotFound):
+        return
+
+    tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    cmd_name = ctx.command.name if ctx.command else "Unknown Prefix Command"
+    print(f"Prefix command error in !{cmd_name}: {error}")
+
+    guild_id = ctx.guild.id if ctx.guild else None
+    ctx_str = f"Prefix Command: `!{cmd_name}` in <#{ctx.channel.id}>"
+    if ctx.author:
+        ctx_str += f" by {ctx.author.mention}"
+
+    await logger_service.log_error(bot, guild_id, type(error).__name__, tb_str, context_info=ctx_str)
+
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send(" Unauthorized: You do not have permission to execute this command.")
+    elif isinstance(error, commands.BotMissingPermissions):
+        await ctx.send(" Permission Error: The bot lacks required permissions in this channel.")
+    else:
+        await ctx.send(f" An error occurred: `{str(error)}`")
+
+
+@bot.event
+async def on_error(event, *args, **kwargs):
+    tb_str = traceback.format_exc()
+    print(f"Global event error in {event}: {tb_str}")
+    guild_id = None
+    if args and isinstance(args[0], discord.Interaction):
+        guild_id = args[0].guild_id
+    elif args and hasattr(args[0], "guild") and args[0].guild:
+        guild_id = args[0].guild.id
+
+    await logger_service.log_error(bot, guild_id, f"Event Error: {event}", tb_str, context_info=f"System Event Handler: `{event}`")
 
 
 if __name__ == "__main__":

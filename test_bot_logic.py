@@ -149,8 +149,13 @@ class TestBotLogic(unittest.IsolatedAsyncioTestCase):
         state = strike_tracker.channel_states[channel_id]
         state["last_video_dt"] = datetime.utcnow() - timedelta(hours=25)
         
-        # Run audit (should trigger strike #1)
+        # Run audit (should NOT auto-issue strike #1 anymore)
         await strike_tracker.audit_channel(ch, bot=None)
+        self.assertEqual(state["active_strikes"], 0)
+
+        # Admin issues manual strike via Give Strike action
+        admin = MockAuthor("AdminUser", 999000)
+        await strike_tracker.add_strikes(ch, amount=1, reason="Admin manual strike (24h window)", admin_user=admin)
         self.assertEqual(state["active_strikes"], 1)
         
         # Fast forward 8 days without new strikes
@@ -197,6 +202,40 @@ class TestBotLogic(unittest.IsolatedAsyncioTestCase):
         # Call resend dashboard
         msg = await update_pinned_dashboard(ch, state["worker_name"], state.get("worker_user_id"), state["active_strikes"], state["strike_dates"], state["last_video_dt"])
         self.assertIsNotNone(msg)
+
+    @patch("sheets_manager.sheets_manager.get_all_staff_records", new_callable=AsyncMock)
+    @patch("sheets_manager.sheets_manager.update_staff_record", new_callable=AsyncMock)
+    @patch("sheets_manager.sheets_manager.get_dm_record", new_callable=AsyncMock)
+    async def test_worker_status_active_inactive_and_channel_delete(self, mock_dm_rec, mock_update_staff, mock_get_staff):
+        mock_get_staff.return_value = []
+        mock_dm_rec.return_value = {}
+
+        ch = MockChannel(channel_id=444, name="status-query")
+        await strike_tracker.initialize_channel(ch)
+        
+        # 1. Claim channel (status -> Active)
+        worker = MockAuthor("StatusWorker", 111222)
+        await strike_tracker.claim_channel_worker(ch, worker)
+        mock_update_staff.assert_called_with(
+            channel_id=str(ch.id),
+            worker_name=worker.name,
+            worker_user_id=str(worker.id),
+            channel_link=f"https://discord.com/channels/{ch.guild.id}/{ch.id}",
+            active_strikes=0,
+            s1_date="", s2_date="", s3_date="",
+            last_video_date="",
+            s1_reason="", s2_reason="", s3_reason="",
+            status="Active"
+        )
+
+        # 2. Unclaim channel (status -> Inactive)
+        admin = MockAuthor("AdminUser", 999000)
+        await strike_tracker.unclaim_channel_worker(ch, admin)
+        self.assertEqual(mock_update_staff.call_args.kwargs.get("status"), "Inactive")
+
+        # 3. Channel Deletion (status -> Inactive)
+        await strike_tracker.mark_channel_inactive(str(ch.id), ch.name)
+        self.assertEqual(mock_update_staff.call_args.kwargs.get("status"), "Inactive")
 
 
 if __name__ == "__main__":
