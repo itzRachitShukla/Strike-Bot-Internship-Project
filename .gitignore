@@ -27,3 +27,4 @@ __pycache__/
 
 # Brain / System Generated Artifacts
 .gemini/
+.agents/
